@@ -76,6 +76,7 @@ export class AnthropicProvider implements ModelProvider {
           name: tool.name,
           description: tool.description,
           input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
+          strict: tool.strict ?? true,
         })),
       } : {}),
       ...(request.thinking ? { thinking: { type: "enabled" as const, budget_tokens: request.thinking.budgetTokens } } : {}),
@@ -97,6 +98,10 @@ export class AnthropicProvider implements ModelProvider {
 
   isRetryable(error: unknown): boolean {
     const status = Number((error as { status?: number })?.status ?? 0);
-    return status === 408 || status === 409 || status === 429 || status >= 500;
+    const name = String((error as { constructor?: { name?: string }; name?: string })?.constructor?.name
+      ?? (error as { name?: string })?.name
+      ?? "");
+    return name === "APIConnectionError" || name === "APIConnectionTimeoutError"
+      || status === 408 || status === 409 || status === 429 || status >= 500;
   }
 }

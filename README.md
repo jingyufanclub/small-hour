@@ -40,7 +40,7 @@ const result = await runtime.turn({
   input: "what is the sky doing?",
 });
 
-if (result.accepted) console.log(result.output);
+if (result.status === "reply") console.log(result.output);
 ```
 
 See [embedding](docs/embedding.md), [security](docs/security.md), and the [Bosie extraction map](docs/bosie-extraction.md).
@@ -51,8 +51,11 @@ Small Hour owns:
 
 - one provider-neutral turn loop;
 - persona and bounded-memory interfaces;
-- an allowlisted tool registry;
+- an allowlisted tool registry with strict schemas and read/write modes;
 - retries, timeouts, usage records, and output-policy hooks;
 - optional structured choice as a first tool call.
+
+Completed turns report `reply`, `silence`, or `rejected`. Provider failures and incomplete contracts throw a
+`RuntimeError`; partial `max_tokens` responses and final-hop tool calls are never treated as successful output.
 
 It intentionally does not own persistence, channels, cron, secrets, authorization, long-term memory policy, or a workflow engine.

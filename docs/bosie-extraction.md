@@ -35,3 +35,11 @@ Small Hour begins from the live loop in Bosie's `server/runtime.ts`, but the pub
 5. Pin Small Hour to a commit or version; never make Bosie follow an unpinned moving package.
 
 Publication remains separate from extraction. The repository is private and has no license until that decision is made.
+
+## Generic hardening sync
+
+The 2026-08-09 audit compared this extraction with Bosie's later live runtime. Small Hour now carries the reusable
+lessons: strict provider schemas, connection-aware retries, abortable backoff, valid bounded tool-result envelopes,
+complete-stop enforcement, a reserved post-tool hop, explicit reply/silence/rejection status, and read-before-choice
+with host-authorized writes. Bosie's grounding envelopes, voice repair, entity provenance, game tools, and durable
+telemetry remain host-specific and intentionally stay out of this package.

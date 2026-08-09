@@ -46,10 +46,11 @@ try {
     const line = (await terminal.question("you> ")).trim();
     if (!line || line === "/quit") break;
     const result = await runtime.turn({ agentId: "moth", input: line, allowedTools: ["read_clock"] });
-    if (!result.accepted) {
+    if (result.status === "rejected") {
       console.error(result.issues.join("; "));
       continue;
     }
+    if (result.status === "silence") continue;
     console.log(`moth> ${result.output}`);
     history.push({ role: "user", content: line }, { role: "assistant", content: result.output });
   }

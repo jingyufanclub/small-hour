@@ -56,7 +56,20 @@ function stringifyResult(value: unknown, limit: number): string {
   } catch {
     rendered = JSON.stringify({ error: "tool result was not JSON-serializable" });
   }
-  return rendered.length <= limit ? rendered : rendered.slice(0, limit);
+  if (rendered.length <= limit) return rendered;
+  const envelope = (preview: string) => JSON.stringify({
+    truncated: true,
+    originalCharacters: rendered.length,
+    preview,
+  });
+  let low = 0;
+  let high = rendered.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (envelope(rendered.slice(0, middle)).length <= limit) low = middle;
+    else high = middle - 1;
+  }
+  return envelope(rendered.slice(0, low));
 }
 
 function abortSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; dispose: () => void } {
@@ -108,7 +121,7 @@ export class SmallHourRuntime {
       delayMs: options.retry?.delayMs ?? defaultRetryPolicy.delayMs,
       retryable: (error) => {
         if (error instanceof RuntimeError && error.code === "turn_aborted") return false;
-        return retryable?.(error) ?? options.provider.isRetryable?.(error) ?? true;
+        return retryable?.(error) ?? options.provider.isRetryable?.(error) ?? false;
       },
     };
     this.timeoutMs = options.timeoutMs ?? 30_000;
@@ -116,8 +129,12 @@ export class SmallHourRuntime {
     this.maxTokens = options.maxTokens ?? 512;
     this.maxToolResultCharacters = options.maxToolResultCharacters ?? 4_000;
     this.toolErrorMode = options.toolErrorMode ?? "result";
-    if (this.timeoutMs < 1 || this.maxHops < 1 || this.maxTokens < 1 || this.maxToolResultCharacters < 1) {
-      throw new TypeError("runtime limits must be positive");
+    if (!Number.isInteger(this.timeoutMs) || !Number.isInteger(this.maxHops) || !Number.isInteger(this.maxTokens)
+      || !Number.isInteger(this.maxToolResultCharacters)) {
+      throw new TypeError("runtime limits must be integers");
+    }
+    if (this.timeoutMs < 1 || this.maxHops < 1 || this.maxTokens < 1 || this.maxToolResultCharacters < 80) {
+      throw new TypeError("runtime limits must be positive and tool results must allow at least 80 characters");
     }
   }
 
@@ -137,28 +154,38 @@ export class SmallHourRuntime {
       const choiceName = input.choice?.name ?? "small_hour_choose";
       if (input.choice) {
         if (this.tools.has(choiceName)) throw new RuntimeError(`choice tool conflicts with registered tool: ${choiceName}`, "choice_tool_conflict");
-        tools.unshift({ name: choiceName, description: input.choice.description, inputSchema: input.choice.inputSchema });
+        tools.unshift({
+          name: choiceName,
+          description: input.choice.description,
+          inputSchema: input.choice.inputSchema,
+          strict: input.choice.strict ?? true,
+        });
       }
 
       const usage = [];
       const toolCalls: ToolCallRecord[] = [];
       let choice: TChoice | undefined;
       let output = "";
-      let finishReason: TurnResult<TChoice>["finishReason"] = "max_hops";
       let hops = 0;
+      let awaitingToolAnswer = false;
 
       for (let hop = 0; hop < this.maxHops; hop++) {
         hops = hop + 1;
-        const response = await withRetry(
-          () => raceAbort(this.options.provider.complete({
-            system: systemBlocks(persona, this.options.cachePersona ?? true),
-            messages,
-            tools,
-            maxTokens: input.maxTokens ?? this.maxTokens,
-            ...(input.thinking ? { thinking: { enabled: true as const, budgetTokens: input.thinking.budgetTokens } } : {}),
-            signal: timeout.signal,
-          }), timeout.signal),
-          this.retry,
+        const offeredTools = choice === undefined ? tools : tools.filter((tool) => tool.name !== choiceName);
+        const response = await raceAbort(
+          withRetry(
+            () => raceAbort(this.options.provider.complete({
+              system: systemBlocks(persona, this.options.cachePersona ?? true),
+              messages,
+              tools: offeredTools,
+              maxTokens: input.maxTokens ?? this.maxTokens,
+              ...(input.thinking ? { thinking: { enabled: true as const, budgetTokens: input.thinking.budgetTokens } } : {}),
+              signal: timeout.signal,
+            }), timeout.signal),
+            this.retry,
+            timeout.signal,
+          ),
+          timeout.signal,
         );
 
         if (response.usage) {
@@ -169,13 +196,37 @@ export class SmallHourRuntime {
         const said = textFrom(response.content);
         if (said) output = said;
         const requested = response.content.filter((block): block is Extract<AssistantBlock, { type: "tool_use" }> => block.type === "tool_use");
-        if (!requested.length || response.stopReason !== "tool_use") {
-          finishReason = response.stopReason;
-          break;
+        if (response.stopReason !== "tool_use") {
+          if (requested.length) {
+            throw new RuntimeError("provider returned tool calls without a tool-use stop", "unexpected_tool_use");
+          }
+          if (response.stopReason !== "end_turn" && response.stopReason !== "stop_sequence") {
+            throw new RuntimeError(`provider stopped before completing the turn: ${response.stopReason}`, "incomplete_stop");
+          }
+          if (input.choice && (input.choice.required ?? true) && choice === undefined) {
+            throw new RuntimeError(`turn ended without required choice ${choiceName}`, "choice_required");
+          }
+          if (awaitingToolAnswer && !said && choice === undefined) {
+            throw new RuntimeError("provider ended without answering after a tool result", "missing_tool_answer");
+          }
+          const policy = await this.outputPolicy.apply(output, context);
+          return {
+            status: policy.accepted ? (policy.output ? "reply" : "silence") : "rejected",
+            output: policy.output,
+            accepted: policy.accepted,
+            issues: policy.issues ?? [],
+            ...(choice === undefined ? {} : { choice }),
+            toolCalls,
+            usage,
+            hops,
+            finishReason: response.stopReason,
+          };
         }
-
-        if (input.choice?.requiredFirst && choice === undefined && requested[0]?.name !== choiceName) {
-          throw new RuntimeError(`first tool call must be ${choiceName}`, "choice_required_first");
+        if (!requested.length) {
+          throw new RuntimeError("provider stopped for tool use without a tool call", "missing_tool_call");
+        }
+        if (hop + 1 >= this.maxHops) {
+          throw new RuntimeError(`tool hop limit ${this.maxHops} reached before executing another tool`, "tool_hop_limit");
         }
 
         messages.push({ role: "assistant", content: response.content });
@@ -187,14 +238,41 @@ export class SmallHourRuntime {
               toolCalls.push({ id: request.id, name: request.name, input: request.input, ok: false });
               continue;
             }
-            choice = request.input as TChoice;
-            await input.choice.onChoice?.(choice, context);
-            results.push({ type: "tool_result", toolUseId: request.id, content: JSON.stringify({ ok: true, chosen: choice }) });
-            toolCalls.push({ id: request.id, name: request.name, input: request.input, ok: true });
+            try {
+              choice = input.choice.parse ? input.choice.parse(request.input) : request.input as TChoice;
+              await input.choice.onChoice?.(choice, context);
+              results.push({ type: "tool_result", toolUseId: request.id, content: JSON.stringify({ ok: true, chosen: choice }) });
+              toolCalls.push({ id: request.id, name: request.name, input: request.input, ok: true });
+            } catch (error) {
+              choice = undefined;
+              results.push({
+                type: "tool_result",
+                toolUseId: request.id,
+                isError: true,
+                content: stringifyResult({ error: error instanceof Error ? error.message : String(error) }, this.maxToolResultCharacters),
+              });
+              toolCalls.push({ id: request.id, name: request.name, input: request.input, ok: false });
+            }
             continue;
           }
 
           try {
+            const mode = this.tools.mode(request.name);
+            if (input.choice && mode === "write") {
+              if (choice === undefined && input.choice.requiredFirst) {
+                throw new RuntimeError(`write tool ${request.name} requires ${choiceName} first`, "choice_required_before_write");
+              }
+              if (choice !== undefined) {
+                const authorized = await input.choice.authorizeWrite?.(
+                  choice,
+                  { name: request.name, input: request.input },
+                  context,
+                ) ?? false;
+                if (!authorized) {
+                  throw new RuntimeError(`choice did not authorize write tool ${request.name}`, "choice_write_not_authorized");
+                }
+              }
+            }
             const value = await raceAbort(
               this.tools.execute(request.name, request.input, { ...context, toolCallId: request.id }),
               timeout.signal,
@@ -213,23 +291,13 @@ export class SmallHourRuntime {
           }
         }
         if (!results.length) {
-          finishReason = response.stopReason;
-          break;
+          throw new RuntimeError("tool-use response produced no tool results", "missing_tool_result");
         }
         messages.push({ role: "user", content: results });
+        awaitingToolAnswer = true;
       }
 
-      const policy = await this.outputPolicy.apply(output, context);
-      return {
-        output: policy.output,
-        accepted: policy.accepted,
-        issues: policy.issues ?? [],
-        ...(choice === undefined ? {} : { choice }),
-        toolCalls,
-        usage,
-        hops,
-        finishReason,
-      };
+      throw new RuntimeError(`tool hop limit ${this.maxHops} exhausted`, "tool_hop_limit");
     } finally {
       timeout.dispose();
     }

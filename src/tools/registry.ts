@@ -5,6 +5,7 @@ export interface ToolDefinition<TInput = unknown, TResult = unknown> {
   description: string;
   inputSchema: JsonSchema;
   mode?: "read" | "write";
+  strict?: boolean;
   parse?: (input: unknown) => TInput;
   execute(input: TInput, context: ToolContext): Promise<TResult> | TResult;
 }
@@ -19,6 +20,9 @@ export class ToolRegistry {
   register<TInput, TResult>(definition: ToolDefinition<TInput, TResult>): this {
     if (!definition.name.trim()) throw new TypeError("tool name is required");
     if (this.definitions.has(definition.name)) throw new Error(`duplicate tool: ${definition.name}`);
+    if (definition.mode !== undefined && definition.mode !== "read" && definition.mode !== "write") {
+      throw new TypeError(`invalid tool mode: ${definition.mode}`);
+    }
     this.definitions.set(definition.name, definition);
     return this;
   }
@@ -37,7 +41,18 @@ export class ToolRegistry {
 
     return [...this.definitions.values()]
       .filter((definition) => !allow || allow.has(definition.name))
-      .map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+      .map(({ name, description, inputSchema, strict }) => ({
+        name,
+        description,
+        inputSchema,
+        strict: strict ?? true,
+      }));
+  }
+
+  mode(name: string): "read" | "write" {
+    const definition = this.definitions.get(name);
+    if (!definition) throw new Error(`unknown tool: ${name}`);
+    return definition.mode ?? "write";
   }
 
   async execute(name: string, input: unknown, context: ToolContext): Promise<unknown> {

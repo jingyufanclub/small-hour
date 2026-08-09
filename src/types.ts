@@ -40,6 +40,7 @@ export interface ProviderTool {
   name: string;
   description: string;
   inputSchema: JsonSchema;
+  strict?: boolean;
 }
 
 export interface TokenUsage {
@@ -86,7 +87,15 @@ export interface StructuredChoiceSpec<TChoice = unknown> {
   name?: string;
   description: string;
   inputSchema: JsonSchema;
+  strict?: boolean;
+  required?: boolean;
   requiredFirst?: boolean;
+  parse?: (input: unknown) => TChoice;
+  authorizeWrite?: (
+    choice: TChoice,
+    tool: { name: string; input: unknown },
+    context: TurnContext,
+  ) => boolean | Promise<boolean>;
   onChoice?: (choice: TChoice, context: TurnContext) => void | Promise<void>;
 }
 
@@ -109,6 +118,7 @@ export interface TurnInput<TChoice = unknown> {
 }
 
 export interface TurnResult<TChoice = unknown> {
+  status: "reply" | "silence" | "rejected";
   output: string;
   accepted: boolean;
   issues: string[];
