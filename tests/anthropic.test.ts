@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
-import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource } from "../src/index.js";
+import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, type RuntimeOptions } from "../src/index.js";
 
-function transport(responses: Array<{ status: number; body: unknown; requestId: string }>) {
+function transport(responses: Array<{ status: number; body: unknown; requestId: string }>, options: Partial<RuntimeOptions> = {}) {
   const requests: Record<string, any>[] = [];
   const client = new Anthropic({ apiKey: "test-only", maxRetries: 4,
     fetch: async (_url, options) => {
@@ -18,7 +18,7 @@ function transport(responses: Array<{ status: number; body: unknown; requestId: 
   });
   const provider = new AnthropicProvider({ model: "test-model", client });
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(),
-    retry: { attempts: 1, delayMs: () => 0 },
+    retry: { attempts: 1, delayMs: () => 0 }, ...options,
   });
   return { runtime, provider, requests };
 }
@@ -53,6 +53,27 @@ test("an injected Anthropic client cannot hide SDK retries from the runtime budg
     return true;
   });
   assert.equal(requests.length, 1);
+});
+
+test("each Anthropic HTTP retry has its own runtime admission and accounting", async () => {
+  const events: string[] = [];
+  const { runtime, requests } = transport([
+    { status: 429, requestId: "req-busy", body: { type: "error", error: { type: "rate_limit_error", message: "busy" } } },
+    { status: 200, requestId: "req-ready", body: {
+      id: "msg-ready", type: "message", role: "assistant", model: "test-model",
+      content: [{ type: "text", text: "done" }], stop_reason: "end_turn", stop_sequence: null,
+      usage: { input_tokens: 12, output_tokens: 8 },
+    } },
+  ], { retry: { attempts: 2, delayMs: () => 0 }, maxModelCalls: 2, modelCalls: {
+    admit: () => { events.push(`admit:${requests.length}`); return true; },
+    record: (call) => { events.push(`record:${call.status}:${requests.length}`); },
+  } });
+  const result = await runtime.turn({ agentId: "a", input: "go" });
+  assert.equal(result.output, "done");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(events, ["admit:0", "record:rejected:1", "admit:1", "record:responded:2"]);
+  assert.deepEqual(result.modelCalls.map((call) => call.accounting), ["recorded", "recorded"]);
+  assert.equal(new Set(result.modelCalls.map((call) => call.callId)).size, 2);
 });
 
 test("Anthropic treats server and connection failures as uncertain outcomes", () => {

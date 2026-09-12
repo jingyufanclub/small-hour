@@ -67,6 +67,25 @@ test("an already cancelled turn starts no host or provider work", async () => {
   assert.equal(calls.length, 0);
 });
 
+test("a failed context load cancels the other loader before returning", async () => {
+  const loadError = new Error("instructions unavailable");
+  let memoryStopped = false;
+  const { provider, calls } = scripted([text()]);
+  await assert.rejects(runtime(provider, {
+    persona: { load: async () => { throw loadError; } },
+    memory: { load: ({ signal }) => new Promise((resolve) => {
+      signal.addEventListener("abort", () => { memoryStopped = true; resolve([]); }, { once: true });
+    }) },
+  }).turn({ agentId: "a", input: "go" }), (error: unknown) => {
+    assert.ok(error instanceof RuntimeError);
+    assert.equal(error.cause, loadError);
+    assert.deepEqual(error.report?.modelCalls, []);
+    return true;
+  });
+  assert.equal(memoryStopped, true);
+  assert.equal(calls.length, 0);
+});
+
 test("deadline covers output and usage callbacks without returning success", async (t) => {
   for (const hook of ["output", "usage"] as const) await t.test(hook, async () => {
     const { provider } = scripted([{ ...text(), usage }]);

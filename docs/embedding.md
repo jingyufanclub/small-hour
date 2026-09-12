@@ -110,6 +110,7 @@ finish outside the runtime. Reconcile unrecorded attempts using their `callId`; 
 was not invoked, but an admission reservation may still need reconciliation.
 
 The same deadline and abort signal cover context loading, provider calls, retry waits, tools, and host callbacks.
+The signal is also aborted when the turn finishes, so a failed context load cancels its pending sibling.
 Cooperative asynchronous work can be cancelled; synchronous code that blocks the JavaScript event loop cannot
 be forcibly interrupted, but elapsed time is checked before starting more work or returning success. Reports do
 not update with late completions and cannot replace durable host receipts.

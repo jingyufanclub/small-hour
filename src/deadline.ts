@@ -40,6 +40,7 @@ export function turnDeadline(parent: AbortSignal | undefined, timeoutMs: number)
     dispose: () => {
       clearTimeout(timer);
       parent?.removeEventListener("abort", onAbort);
+      controller.abort(new Error("turn finished"));
     },
   };
 }
