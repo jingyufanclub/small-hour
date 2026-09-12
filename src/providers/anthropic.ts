@@ -57,9 +57,25 @@ function stopReason(reason: Anthropic.Message["stop_reason"]): ProviderResponse[
   return "unknown";
 }
 
+function tokenUsage(message: Anthropic.Message): ProviderResponse["usage"] {
+  if (!message.usage) return undefined;
+  const usage = {
+    model: message.model,
+    freshInputTokens: message.usage.input_tokens,
+    cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
+    outputTokens: message.usage.output_tokens,
+  };
+  const counts = [usage.freshInputTokens, usage.cacheWriteTokens, usage.cacheReadTokens, usage.outputTokens];
+  return counts.every((count) => Number.isSafeInteger(count) && count >= 0) ? usage : undefined;
+}
+
 export class AnthropicProvider implements ModelProvider {
   readonly name = "anthropic";
+  readonly capabilities = { structuredOutput: true };
   private readonly client: Anthropic;
+
+  get model(): string { return this.options.model; }
 
   constructor(private readonly options: AnthropicProviderOptions) {
     if (!options.model.trim()) throw new TypeError("Anthropic model is required");
@@ -80,19 +96,24 @@ export class AnthropicProvider implements ModelProvider {
         })),
       } : {}),
       ...(request.thinking ? { thinking: { type: "enabled" as const, budget_tokens: request.thinking.budgetTokens } } : {}),
+      ...(request.outputSchema ? { output_config: { format: { type: "json_schema" as const, schema: request.outputSchema } } } : {}),
       messages: anthropicMessages(request.messages),
-    }, { signal: request.signal });
+    }, { signal: request.signal, maxRetries: 0 });
 
     return {
       content: genericContent(message.content),
       stopReason: stopReason(message.stop_reason),
-      usage: {
-        model: message.model,
-        freshInputTokens: message.usage.input_tokens ?? 0,
-        cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
-        cacheReadTokens: message.usage.cache_read_input_tokens ?? 0,
-        outputTokens: message.usage.output_tokens ?? 0,
-      },
+      requestId: message._request_id ?? undefined,
+      usage: tokenUsage(message),
+    };
+  }
+
+  failureInfo(error: unknown): { status: "rejected" | "unknown"; requestId?: string } {
+    const failure = error as { status?: unknown; requestID?: unknown } | null;
+    const status = Number(failure?.status ?? 0);
+    return {
+      status: status >= 400 && status < 500 && status !== 408 ? "rejected" : "unknown",
+      ...(typeof failure?.requestID === "string" ? { requestId: failure.requestID } : {}),
     };
   }
 

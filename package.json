@@ -2,7 +2,7 @@
   "name": "small-hour",
   "version": "0.1.0",
   "private": true,
-  "description": "A bounded TypeScript runtime for persistent character agents.",
+  "description": "A bounded TypeScript runtime for agent turns.",
   "type": "module",
   "exports": {
     ".": {
@@ -22,7 +22,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.ts",
+    "test": "tsx --test tests/*.test.ts",
     "example": "tsx examples/small-companion/index.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },

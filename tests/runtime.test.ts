@@ -317,7 +317,7 @@ test("output rejection does not replay tools or silently clip text", async () =>
   assert.equal(executions, 1);
 });
 
-test("keeps oversized tool results valid JSON inside the configured bound", async () => {
+test("rejects host compaction that still exceeds the configured bound", async () => {
   const provider = new ScriptedProvider([
     { content: [{ type: "tool_use", id: "large-1", name: "large_read", input: {} }], stopReason: "tool_use" },
     text("read it"),
@@ -335,18 +335,12 @@ test("keeps oversized tool results valid JSON inside the configured bound", asyn
     memory: new EmptyMemorySource(),
     tools,
     maxToolResultCharacters: 120,
+    toolResultOverflow: (value) => value,
   });
 
-  await runtime.turn({ agentId: "a-large", input: "read" });
-  const message = provider.calls[1]?.messages.at(-1);
-  assert.equal(message?.role, "user");
-  const block = typeof message?.content === "string" ? undefined : message?.content[0];
-  assert.equal(block?.type, "tool_result");
-  if (block?.type !== "tool_result") assert.fail("missing tool result");
-  assert.ok(block.content.length <= 120);
-  const envelope = JSON.parse(block.content);
-  assert.equal(envelope.truncated, true);
-  assert.ok(envelope.originalCharacters > 500);
+  await assert.rejects(runtime.turn({ agentId: "a-large", input: "read" }),
+    (error: unknown) => error instanceof RuntimeError && error.code === "tool_result_too_large");
+  assert.equal(provider.calls.length, 1);
 });
 
 test("rejects incomplete provider stops", async () => {

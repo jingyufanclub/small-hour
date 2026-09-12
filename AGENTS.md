@@ -1,6 +1,6 @@
 # Small Hour working rules
 
-Small Hour is a compact, provider-neutral TypeScript runtime for persistent character agents. It gives a model a persona, a bounded memory view, and explicitly registered tools for one turn.
+Small Hour is a compact, provider-neutral TypeScript runtime for bounded agent turns. It gives a model system instructions, a bounded memory view, and explicitly registered tools or a structured output contract for one turn.
 
 Keep the package boundary narrow:
 
