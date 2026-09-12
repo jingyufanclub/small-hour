@@ -102,24 +102,30 @@ test("OpenAI accepts a completed answer with a null phase", async () => {
   assert.equal(requests.length, 1);
 });
 
-test("local compatibility preserves a tool exchange and sends no implicit cloud credential", async (t) => {
+test("local compatibility preserves native history and sends no implicit cloud credential", async (t) => {
   const previousKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "cloud-key-must-not-reach-local-server";
   t.after(() => { if (previousKey === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = previousKey; });
-  const { fetch, requests } = transport([completion(null, [{ type: "function", id: "local-call", function: { name: "lookup", arguments: '{"id":"item-7"}' } }]), completion("Available.")]);
+  const first = completion(null, [{ type: "function", id: "local-call", function: { name: "lookup", arguments: '{"id":"item-7"}' } }]);
+  const native = { ...first.choices[0].message, reasoning_content: "Inspect the selected item before answering." };
+  first.choices[0].message = native;
+  const { fetch, requests } = transport([first, completion("Available.")]);
   const provider = new OpenAICompatibleProvider({ model: "loaded-model", baseURL: "http://127.0.0.1:11434/v1/", fetch, capabilities: { tools: true } });
+  let reads = 0;
   const tools = new ToolRegistry([{ name: "lookup", mode: "read", description: "Read an item", inputSchema: lookupSchema,
-    execute: (input) => ({ id: (input as { id: string }).id, available: true }),
+    execute: (input) => { reads++; return { id: (input as { id: string }).id, available: true }; },
   }]);
   const result = await runtime(provider, { tools }).turn({ agentId: "router", input: "Read item-7." });
   assert.equal(result.output, "Available.");
+  assert.equal(reads, 1);
+  assert.equal(requests.length, 2);
   assert.equal(requests[0].url, "http://127.0.0.1:11434/v1/chat/completions");
   assert.equal(new Headers(requests[0].options.headers).has("authorization"), false);
   assert.equal(requests[0].body.max_tokens, 512);
   assert.equal(requests[0].body.stream, false);
   assert.equal(requests[0].body.tools[0].function.name, "lookup");
   assert.deepEqual(requests[1].body.messages.at(-1), { role: "tool", tool_call_id: "local-call", content: '{"id":"item-7","available":true}' });
-  assert.equal(requests[1].body.messages.at(-2).tool_calls[0].id, "local-call");
+  assert.deepEqual(requests[1].body.messages.at(-2), native);
 });
 
 test("local structured output requires explicit capability and retains host validation", async () => {
@@ -254,6 +260,30 @@ for (const protocol of ["responses", "chat"] as const) {
     }), "structured_output_invalid");
     assert.equal(requests.length, 1);
     assert.equal(report.modelCalls[0].status, "responded");
+  });
+
+  test(`${protocol} truncated text cannot reach final output or structured validation`, async (t) => {
+    for (const mode of ["text", "structured"] as const) await t.test(mode, async () => {
+      const output = '{"selectedId":"item-7"}';
+      const body = protocol === "responses"
+        ? { ...response([{ ...message(output, "final_answer"), status: "incomplete" }]),
+          status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
+        : { ...completion(output), choices: [{ finish_reason: "length", message: { role: "assistant", content: output } }] };
+      const { fetch, requests } = transport([body, success()]);
+      let acceptedOutputHandlers = 0;
+      const app = runtime(make(fetch), { retry: { attempts: 3, delayMs: () => 0 }, outputPolicy: {
+        apply: (text) => { acceptedOutputHandlers++; return { output: text, accepted: true }; },
+      } });
+      const input = { agentId: "a", input: "Select item-7." };
+      const report = await failure(mode === "structured"
+        ? app.turn({ ...input, structuredOutput: { schema, parse: (value) => { acceptedOutputHandlers++; return value; } } })
+        : app.turn(input), "incomplete_stop");
+      assert.equal(acceptedOutputHandlers, 0);
+      assert.equal(requests.length, 1);
+      assert.equal(report.modelCalls[0].status, "responded");
+      assert.equal(report.modelCalls[0].requestId, "request-1");
+      assert.equal(report.toolCalls.length, 0);
+    });
   });
 
   test(`${protocol} a pending HTTP call receives cancellation with no later attempt`, async () => {
