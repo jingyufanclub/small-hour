@@ -63,7 +63,7 @@ export interface ProviderRequest {
 
 export interface ProviderResponse {
   content: AssistantBlock[];
-  stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "unknown";
+  stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "refusal" | "content_filter" | "unknown";
   usage?: TokenUsage;
   requestId?: string;
 }
@@ -71,7 +71,7 @@ export interface ProviderResponse {
 export interface ModelProvider {
   readonly name: string;
   readonly model?: string;
-  readonly capabilities?: { structuredOutput?: boolean };
+  readonly capabilities?: { structuredOutput?: boolean; tools?: boolean; thinkingBudget?: boolean };
   complete(request: ProviderRequest): Promise<ProviderResponse>;
   isRetryable?(error: unknown): boolean;
   failureInfo?(error: unknown): { status: "rejected" | "unknown"; requestId?: string };

@@ -1,0 +1,92 @@
+import { RuntimeError, type AssistantBlock, type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse } from "../types.js";
+import { array, httpFailureInfo, invalidResponse, isObject, isRetryableHttpError, object, opaquePayload, postJson, string, tokenUsage } from "./http.js";
+
+export interface OpenAIProviderOptions {
+  model: string;
+  apiKey?: string;
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  fetch?: typeof globalThis.fetch;
+}
+
+function inputItems(messages: ProviderMessage[]): unknown[] {
+  return messages.flatMap((message): unknown[] => {
+    if (typeof message.content === "string") return [{ role: message.role, content: message.content }];
+    if (message.role === "assistant") {
+      const native = opaquePayload(message.content, "openai-responses");
+      if (native !== undefined) return array(native);
+      return message.content.map((block) => {
+        if (block.type === "text") return { role: "assistant", content: block.text };
+        if (block.type === "tool_use") return { type: "function_call", call_id: block.id, name: block.name, arguments: JSON.stringify(block.input) };
+        throw new RuntimeError("unsupported provider history", "provider_history_invalid");
+      });
+    }
+    return message.content.map((block) => block.type === "text"
+      ? { role: "user", content: block.text }
+      : { type: "function_call_output", call_id: block.toolUseId, output: block.content });
+  });
+}
+
+function decode(data: Record<string, unknown>, requestId?: string): ProviderResponse {
+  const output = array(data.output);
+  const content: AssistantBlock[] = [{ type: "opaque", value: { protocol: "openai-responses", payload: output } }];
+  let refusal = false;
+  let incomplete = false;
+  let visibleMessage = false;
+  for (const value of output) {
+    const item = object(value);
+    if (item.status !== undefined && item.status !== "completed") incomplete = true;
+    if (item.type === "function_call") {
+      content.push({ type: "tool_use", id: string(item.call_id), name: string(item.name), input: object(JSON.parse(string(item.arguments))) });
+    } else if (item.type === "message") {
+      if (item.role !== "assistant") throw new Error("expected an assistant message");
+      if (item.phase != null && item.phase !== "commentary" && item.phase !== "final_answer") incomplete = true;
+      for (const part of array(item.content)) {
+        const block = object(part);
+        if (block.type === "refusal") refusal = true;
+        else if (block.type === "output_text") {
+          const text = string(block.text);
+          if (item.phase !== "commentary") { visibleMessage = true; content.push({ type: "text", text }); }
+        } else incomplete = true;
+      }
+    } else if (item.type !== "reasoning") incomplete = true;
+  }
+  const usage = isObject(data.usage) ? data.usage : {};
+  const details = data.incomplete_details == null ? {} : object(data.incomplete_details);
+  let stopReason: ProviderResponse["stopReason"] = "unknown";
+  if (data.status === "incomplete") {
+    if (details.reason === "max_output_tokens") stopReason = "max_tokens";
+    else if (details.reason === "content_filter") stopReason = "content_filter";
+  } else if (data.status === "completed" && data.error == null && !incomplete) {
+    if (refusal) stopReason = "refusal";
+    else if (content.some((block) => block.type === "tool_use")) stopReason = "tool_use";
+    else if (visibleMessage) stopReason = "end_turn";
+  }
+  return { content, stopReason, requestId, usage: tokenUsage(data.model, usage.input_tokens, usage.output_tokens, usage.input_tokens_details) };
+}
+
+export class OpenAIProvider implements ModelProvider {
+  readonly name = "openai";
+  readonly capabilities = { tools: true, structuredOutput: true, thinkingBudget: false };
+  private readonly apiKey: string;
+  get model(): string { return this.options.model; }
+  constructor(private readonly options: OpenAIProviderOptions) {
+    if (!options.model.trim()) throw new TypeError("OpenAI model is required");
+    this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? "";
+    if (!this.apiKey.trim()) throw new TypeError("OpenAI apiKey or OPENAI_API_KEY is required");
+  }
+  async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    if (request.thinking) throw new RuntimeError("OpenAI uses reasoningEffort instead of a thinking token budget", "thinking_unsupported");
+    const { data, requestId } = await postJson("https://api.openai.com/v1/responses", {
+      model: this.model, instructions: request.system.map((block) => block.text).join("\n\n"),
+      input: inputItems(request.messages), max_output_tokens: request.maxTokens, store: false, stream: false, truncation: "disabled",
+      ...(this.options.reasoningEffort ? { reasoning: { effort: this.options.reasoningEffort } } : {}),
+      ...(request.tools.length ? { tools: request.tools.map((tool) => ({ type: "function", name: tool.name,
+        description: tool.description, parameters: tool.inputSchema, strict: tool.strict ?? true,
+      })) } : {}),
+      ...(request.outputSchema ? { text: { format: { type: "json_schema", name: "small_hour_result", strict: true, schema: request.outputSchema } } } : {}),
+    }, request.signal, this.apiKey, this.options.fetch);
+    try { return decode(data, requestId); } catch (error) { throw invalidResponse(error, requestId); }
+  }
+  isRetryable = isRetryableHttpError;
+  failureInfo = httpFailureInfo;
+}

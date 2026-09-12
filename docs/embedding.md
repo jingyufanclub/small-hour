@@ -133,3 +133,38 @@ provider call. The Anthropic adapter sends the supplied schema unchanged through
 Choose a compatible model and schema; unsupported schemas or models can still be rejected by the API.
 The host parser remains authoritative. Other adapters must disable internal retries so every billed attempt
 passes through runtime admission. Anthropic disables SDK retries even for an injected client.
+
+`OpenAIProvider` uses [`POST /v1/responses`](https://developers.openai.com/api/docs/guides/function-calling).
+It sends the complete supplied context with `store: false` and `truncation: "disabled"`, without a conversation ID
+or previous-response lookup. Native output items, including encrypted reasoning, exact call IDs, and assistant
+phases, are echoed during the tool loop. The normalized text/tool view is for runtime dispatch; the native items
+remain the authoritative provider history. Do not modify or combine that opaque history with another provider's
+blocks. Commentary-phase text is not returned as the final answer. These items are not saved across turns by
+Small Hour; `store: false` is a request-storage setting, not a claim about every provider retention policy.
+
+OpenAI schemas are sent unchanged. Strict schemas must follow the API's supported schema rules; the adapter
+does not rewrite optional fields, enums, or allowed IDs. `maxTokens` becomes `max_output_tokens`, covering all
+generated tokens including reasoning. Configure `reasoningEffort` for models supporting that setting.
+OpenAI's effort levels do not express an exact thinking-token budget, so `thinking.budgetTokens` is rejected
+before admission instead of being silently ignored or approximated.
+
+`OpenAICompatibleProvider` targets `/chat/completions` beneath an explicit `baseURL`, normally ending in `/v1`.
+It uses `max_tokens`, standard function-call/tool-result messages, and opt-in `response_format.json_schema`.
+Examples of servers implementing this protocol include [Ollama](https://docs.ollama.com/api/openai-compatibility)
+and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat/structured-output). This does not certify every
+local model. Text works by default; tools and structured output require explicit capability settings for the
+chosen server/model. Unsupported tools, required-choice tools, structured results, and thinking budgets fail
+before admission. Withheld tools and invalid selections still fail at the same runtime/host boundaries after
+a model responds. The adapter never scrapes tool calls from prose or repairs invalid JSON with another call.
+
+Local-server authorization comes only from the explicit `apiKey` option. No cloud credential, endpoint, model,
+or fallback is selected automatically. Both HTTP adapters use native `fetch`, without a retrying SDK, and
+reject redirects. The selected endpoint receives the supplied instructions, memory, and tool results; host
+tools and memory loaders retain their own data-access responsibilities.
+
+Provider refusals and content filtering throw `provider_refused` and `provider_filtered`, with the turn report.
+Incomplete responses cannot execute tool calls or become accepted output. Malformed protocol responses stop
+without a repair call. HTTP 4xx failures other than 408 are known rejection; server and connection failures
+retain uncertainty. Missing or invalid usage remains unknown while valid replies and request IDs are preserved.
+Reported cached input is separated from fresh input, and output usage includes reasoning tokens when the
+provider includes them in its total. Local accounting hooks do not imply a cloud charge; prices remain host policy.

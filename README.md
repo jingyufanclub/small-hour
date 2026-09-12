@@ -8,7 +8,7 @@ Use it for task assistants, reporting agents, or other applications that need a 
 
 The package is at version 0.1.0, with its API and license still being decided. Its `private` package flag prevents accidental npm publication.
 
-The provider interface is pluggable; Anthropic is the only included adapter. Other providers require an implementation of `ModelProvider`. The current interface supports text, tool calls, and optional structured results; it does not expose streaming, image, or audio input.
+Included adapters support Anthropic, OpenAI's Responses API, and local or hosted servers implementing OpenAI-compatible Chat Completions. The current interface supports text, tool calls, and optional structured results; it does not expose streaming, image, or audio input. Model and server capabilities still determine which features are available.
 
 ## Install and check
 
@@ -52,6 +52,44 @@ if (result.status === "reply") console.log(result.output);
 `persona` is the API name for the system-instruction source. It can contain ordinary task instructions and application policy. Implement `PersonaSource` for dynamic instructions and `MemorySource` for context selected by the host.
 
 See [embedding](docs/embedding.md) and [security](docs/security.md).
+
+## OpenAI and local models
+
+Use either provider below in the same runtime configuration. The host supplies the model ID.
+
+```ts
+import { OpenAIProvider } from "small-hour/providers/openai";
+
+const provider = new OpenAIProvider({
+  model: process.env.OPENAI_MODEL!,
+  apiKey: process.env.OPENAI_API_KEY!,
+});
+```
+
+The OpenAI adapter uses stateless Responses requests with `store: false`. Native reasoning data and message
+phases stay intact through tool exchanges within the turn. Use its optional `reasoningEffort` setting for
+compatible reasoning models. `maxTokens` caps total generated tokens, including reasoning; a numeric
+`thinking.budgetTokens` is not translated into an OpenAI effort level.
+
+```ts
+import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
+
+const provider = new OpenAICompatibleProvider({
+  model: process.env.LOCAL_MODEL!,
+  baseURL: "http://127.0.0.1:11434/v1",
+  capabilities: { tools: true, structuredOutput: true },
+});
+```
+
+That URL is Ollama's usual local endpoint. LM Studio normally uses `http://127.0.0.1:1234/v1`.
+Set capabilities only after verifying that the server and loaded model support them; both default to `false`.
+Text-only turns work without enabling either. Local models must be served through the compatible HTTP API;
+Small Hour does not load model files or start a model server. An optional `apiKey` supports authenticated servers
+and is never filled from OpenAI environment variables.
+
+Both adapters make one HTTP request per attempt and leave retries, admission, accounting, and cancellation to
+the runtime. Neither switches providers, follows HTTP redirects, or adds fallback model calls. See the
+[provider contracts](docs/embedding.md#provider-adapters) for capability and failure details.
 
 ## Boundary
 

@@ -112,6 +112,7 @@ export class SmallHourRuntime {
       if (!input.agentId.trim() || !context.turnId.trim()) throw new TypeError("agentId and turnId are required");
       if (input.maxTokens !== undefined && (!Number.isSafeInteger(input.maxTokens) || input.maxTokens < 1)) throw new TypeError("maxTokens must be a positive integer");
       if (input.thinking && (!Number.isSafeInteger(input.thinking.budgetTokens) || input.thinking.budgetTokens < 1)) throw new TypeError("thinking budget must be a positive integer");
+      if (input.thinking && this.options.provider.capabilities?.thinkingBudget === false) throw new RuntimeError("provider does not support a thinking token budget", "thinking_unsupported");
       if (input.structuredOutput) {
         if (input.choice || input.allowedTools !== undefined) throw new RuntimeError("structured output cannot be combined with tools or choice", "structured_output_conflict");
         if (!this.options.provider.capabilities?.structuredOutput) throw new RuntimeError("provider does not support structured output", "structured_output_unsupported");
@@ -123,6 +124,7 @@ export class SmallHourRuntime {
         if (this.tools.has(choiceName)) throw new RuntimeError(`choice tool conflicts with registered tool: ${choiceName}`, "choice_tool_conflict");
         tools.unshift({ name: choiceName, description: input.choice.description, inputSchema: input.choice.inputSchema, strict: input.choice.strict ?? true });
       }
+      if (tools.length && this.options.provider.capabilities?.tools === false) throw new RuntimeError("provider does not support tools", "tools_unsupported");
       const [persona, memory] = await Promise.all([
         timeout.run(() => this.options.persona.load(context)),
         timeout.run(() => this.options.memory.load(context)),
@@ -154,6 +156,8 @@ export class SmallHourRuntime {
           id: request.id, name: request.name, input: structuredClone(request.input), ok: false, status: "not_started", receiptIds: [],
         }));
         report.toolCalls.push(...pending);
+        if (response.stopReason === "refusal") throw new RuntimeError("provider refused the request", "provider_refused");
+        if (response.stopReason === "content_filter") throw new RuntimeError("provider filtered the response", "provider_filtered");
         if (input.structuredOutput && (requested.length || response.stopReason === "tool_use")) throw new RuntimeError("structured output returned a tool call", "unexpected_tool_use");
         if (response.stopReason !== "tool_use") {
           if (requested.length) throw new RuntimeError("provider returned tool calls without a tool-use stop", "unexpected_tool_use");

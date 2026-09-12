@@ -16,5 +16,7 @@ Small Hour assumes model input and model output are untrusted.
 - Structured output requires a host parser; a provider schema alone cannot authorize an action or prove a selected ID is valid.
 - Oversized tool results fail unless the host supplies a bounded replacement. Compaction must preserve necessary evidence.
 - Reports and receipts describe known progress, not rollback. Reconcile uncertain tools, model calls, and unrecorded accounting before retrying.
+- OpenAI and compatible HTTP adapters make one request per attempt, reject redirects, and never switch to a fallback provider. A compatible endpoint receives only its explicitly supplied API key.
+- Choose a trusted provider endpoint and declare its actual tool/schema capabilities. Native provider history is opaque context for that same adapter and must not be modified or mixed across providers.
 
 The runtime deliberately has no shell, filesystem, browser, network proxy, scheduler, channel adapter, or secret store. Applications may expose narrow versions of those capabilities as tools, but the risk and authorization remain theirs.
