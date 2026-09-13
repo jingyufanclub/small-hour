@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
-  type ModelProvider, type ProviderRequest, type ProviderResponse, type RuntimeOptions,
+  type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse, type RuntimeOptions,
   type TurnReport,
 } from "../src/index.js";
 
@@ -45,6 +45,66 @@ async function failure(promise: Promise<unknown>, code: string): Promise<TurnRep
   assert.fail(`expected ${code}`);
 }
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+test("each turn uses fresh host memory without inheriting prior tool exchanges", async () => {
+  const original: ProviderMessage[] = [{ role: "user", content: "Available item: coat-1" }];
+  let selected = original;
+  const loads: Array<{ agentId: string; turnId: string; input: string }> = [];
+  const { provider, calls } = scripted([use("lookup"), text("Coat found."), text(), text()]);
+  const shared = runtime(provider, {
+    memory: { load: async ({ agentId, turnId, input }) => {
+      loads.push({ agentId, turnId, input });
+      return selected;
+    } },
+    tools: new ToolRegistry([{ name: "lookup", description: "Look up an item", mode: "read", inputSchema: {},
+      execute: () => ({ itemId: "coat-1", location: "studio" }),
+    }]),
+  });
+
+  await shared.turn({ agentId: "wardrobe", turnId: "find", input: "Find my coat." });
+  assert.deepEqual(original, [{ role: "user", content: "Available item: coat-1" }]);
+  assert.deepEqual(calls[1].messages.at(-1), { role: "user", content: [
+    { type: "tool_result", toolUseId: "lookup-0", content: '{"itemId":"coat-1","location":"studio"}' },
+  ] });
+
+  selected = [{ role: "user", content: "Available item: boots-2" }];
+  await shared.turn({ agentId: "wardrobe", turnId: "replace", input: "What is available now?" });
+  assert.deepEqual(calls[2].messages, [
+    { role: "user", content: "Available item: boots-2" },
+    { role: "user", content: "What is available now?" },
+  ]);
+
+  selected = [];
+  await shared.turn({ agentId: "wardrobe", turnId: "empty", input: "Start with no saved context." });
+  assert.deepEqual(calls[3].messages, [{ role: "user", content: "Start with no saved context." }]);
+  assert.deepEqual(loads, [
+    { agentId: "wardrobe", turnId: "find", input: "Find my coat." },
+    { agentId: "wardrobe", turnId: "replace", input: "What is available now?" },
+    { agentId: "wardrobe", turnId: "empty", input: "Start with no saved context." },
+  ]);
+});
+
+test("a failed memory load cannot reuse an earlier turn's context", async () => {
+  const unavailable = new Error("memory storage unavailable");
+  let failLoad = false;
+  const { provider, calls } = scripted([text(), text()]);
+  const shared = runtime(provider, { memory: { load: async () => {
+    if (failLoad) throw unavailable;
+    return [{ role: "user", content: "Previously available private context" }];
+  } } });
+
+  await shared.turn({ agentId: "a", turnId: "first", input: "Use current context." });
+  failLoad = true;
+  await assert.rejects(shared.turn({ agentId: "a", turnId: "second", input: "Use current context again." }), (error: unknown) => {
+    assert.ok(error instanceof RuntimeError);
+    assert.equal(error.cause, unavailable);
+    assert.equal(error.report?.turnId, "second");
+    assert.deepEqual(error.report?.modelCalls, []);
+    assert.deepEqual(error.report?.toolCalls, []);
+    return true;
+  });
+  assert.equal(calls.length, 1);
+});
 
 test("dispatch rejects a registered tool withheld from this turn", async () => {
   let writes = 0;
@@ -350,23 +410,42 @@ test("result encoding failures preserve the completed effect and prevent more ca
   });
 });
 
-test("concurrent turns retain their own identities, receipts, and model attempts", async () => {
+test("concurrent turns isolate model context, tool results, identities, and receipts", async () => {
+  const calls: ProviderRequest[] = [];
   const provider: ModelProvider = { name: "concurrent", async complete(request) {
-    const input = request.messages[0].content as string;
-    if (request.messages.length > 1) return text(input);
+    calls.push({ ...structuredClone({ ...request, signal: undefined }), signal: request.signal });
+    const input = request.messages[1].content as string;
+    if (request.messages.length > 2) return text(input);
     return use("save");
   } };
+  let release!: () => void;
+  const bothStarted = new Promise<void>((resolve) => { release = resolve; });
+  let started = 0;
   const tools = new ToolRegistry([{ name: "save", description: "save", inputSchema: {}, execute: async (_, context) => {
-    await delay(context.agentId === "first" ? 10 : 1);
+    if (++started === 2) release();
+    await bothStarted;
     context.recordReceipt(`${context.agentId}-receipt`); return { agentId: context.agentId };
   } }]);
-  const shared = runtime(provider, { tools });
+  const shared = runtime(provider, { tools,
+    memory: { load: async ({ agentId }) => [{ role: "user", content: `${agentId} private context` }] },
+  });
   const results = await Promise.all(["first", "second"].map((id) => shared.turn({ agentId: id, turnId: `${id}-turn`, input: id })));
   for (const result of results) {
     assert.equal(result.output, result.agentId);
     assert.equal(result.turnId, `${result.agentId}-turn`);
     assert.deepEqual(result.toolCalls[0].receiptIds, [`${result.agentId}-receipt`]);
     assert.deepEqual(result.modelCalls.map((call) => call.attempt), [1, 2]);
+    const ownCalls = calls.filter((call) => call.messages[1].content === result.agentId);
+    assert.equal(ownCalls.length, 2);
+    const initial: ProviderMessage[] = [
+      { role: "user", content: `${result.agentId} private context` },
+      { role: "user", content: result.agentId },
+    ];
+    assert.deepEqual(ownCalls[0].messages, initial);
+    assert.deepEqual(ownCalls[1].messages, [...initial,
+      { role: "assistant", content: use("save").content },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "save-0", content: JSON.stringify({ agentId: result.agentId }) }] },
+    ]);
   }
   assert.equal(new Set(results.flatMap((result) => result.modelCalls.map((call) => call.callId))).size, 4);
 });

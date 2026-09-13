@@ -1,125 +1,83 @@
 # Small Hour
 
-Small Hour is a compact TypeScript library for running bounded agent turns. Each turn receives system instructions, host-selected memory, and registered tools, then runs a provider/tool loop and returns its result. The host application owns persistence, authorization, scheduling, delivery, and the implementation of side effects.
+Small Hour is a provider-neutral TypeScript runtime for bounded LLM turns. It assembles consumer-supplied instructions and context, executes registered tools, applies output validation, and returns structured execution reports.
 
-Use it for task assistants, reporting agents, or other applications that need a small turn loop around a model. Continuity comes from state supplied by the host on each call; the runtime does not retain a conversation between turns.
+The runtime owns execution within a turn. Consuming applications own persistent state, authorization, durable recovery, scheduling, and delivery.
 
-## Status
+## Capabilities
 
-The package is at version 0.1.0, with its API and license still being decided. Its `private` package flag prevents accidental npm publication.
+- Anthropic, OpenAI Responses, and OpenAI-compatible Chat Completions adapters.
+- Fresh system instructions and consumer-selected memory for each turn, with no retained session history.
+- Sequential tool dispatch with per-turn allowlists, input parsers, and read/write modes.
+- Structured choices with optional consumer authorization of subsequent writes.
+- Structured results with mandatory consumer validation and no tool loop.
+- Configurable model-call budgets, retries, deadlines, token limits, and tool-result limits.
+- Per-attempt admission and accounting hooks, token usage, and partial failure reports.
 
-Included adapters support Anthropic, OpenAI's Responses API, and local or hosted servers implementing OpenAI-compatible Chat Completions. The current interface supports text, tool calls, and optional structured results; it does not expose streaming, image, or audio input. Model and server capabilities still determine which features are available.
+The interface supports text, tool calls, and structured results. Streaming, image input, and audio input are not exposed.
 
-## Install and check
+## Usage
 
-```bash
-npm install
-npm run check
-```
+Requires Node.js 20 or later and an ESM consumer. Install repository dependencies with `npm ci` and build with `npm run build`. Package exports resolve to the generated `dist` directory.
 
-## Minimal turn
+1. Configure a provider adapter with a model, credentials, and endpoint as required.
+2. Construct `SmallHourRuntime` with `provider`, `persona`, and `memory`. `PersonaSource.load(context)` supplies system instructions; `MemorySource.load(context)` supplies a bounded context view. Both are loaded on every turn. `StaticPersonaSource` and `EmptyMemorySource` provide static instructions and empty context.
+3. Register consumer-implemented functions through `ToolRegistry`, and configure execution limits and any validation, admission, or accounting hooks.
+4. Call `runtime.turn()` with `agentId` and `input`. An explicit `turnId` and `AbortSignal` are optional. `allowedTools` narrows the registry for that turn and is enforced at dispatch.
+5. Handle the result or `RuntimeError`. Text turns return `reply`, `silence`, or `rejected`; structured turns return `structured` with a typed `value`. Failed turns carry a partial `report`.
 
-This example uses the included Anthropic adapter and requires `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` in the host environment.
+Tool definitions provide `name`, `description`, `inputSchema`, and `execute`. Optional `parse` and `mode` fields control input validation and read/write classification.
 
-```ts
-import {
-  EmptyMemorySource,
-  SmallHourRuntime,
-  StaticPersonaSource,
-  ToolRegistry,
-} from "small-hour";
-import { AnthropicProvider } from "small-hour/providers/anthropic";
+For structured results, supply `structuredOutput` with a JSON Schema and a mandatory `parse` function. This mode requires one successful provider call; transport retries remain subject to the turn budget. It offers no tools and cannot be combined with `allowedTools` or `choice`.
 
-const runtime = new SmallHourRuntime({
-  provider: new AnthropicProvider({
-    model: process.env.ANTHROPIC_MODEL!,
-  }),
-  persona: new StaticPersonaSource(
-    "Summarize supplied operational notes. Distinguish confirmed facts from pending work.",
-  ),
-  memory: new EmptyMemorySource(),
-  tools: new ToolRegistry(),
-});
+For a validated decision within a tool turn, configure `choice` with a parser and, where required, `authorizeWrite`. An accepted choice remains in the report if later work fails.
 
-const result = await runtime.turn({
-  agentId: "reporting-agent",
-  input: "Backup completed at 03:10 UTC. Restore verification is pending. Summarize the status.",
-});
+See [embedding](docs/embedding.md) for the complete integration contracts.
 
-if (result.status === "reply") console.log(result.output);
-```
+## Providers
 
-`persona` is the API name for the system-instruction source. It can contain ordinary task instructions and application policy. Implement `PersonaSource` for dynamic instructions and `MemorySource` for context selected by the host.
+| Adapter | Import path | Protocol |
+| --- | --- | --- |
+| `AnthropicProvider` | `small-hour/providers/anthropic` | Anthropic Messages |
+| `OpenAIProvider` | `small-hour/providers/openai` | OpenAI Responses |
+| `OpenAICompatibleProvider` | `small-hour/providers/openai-compatible` | OpenAI-compatible Chat Completions |
 
-See [embedding](docs/embedding.md) and [security](docs/security.md).
+Included adapters leave retries to the runtime. Anthropic SDK retries are disabled; the HTTP adapters issue one request per attempt. OpenAI Responses requests use `store: false` and preserve native reasoning data within the turn.
 
-## OpenAI and local models
+The compatible adapter requires an explicit `baseURL`. Tool and structured-output capabilities default to disabled and must be enabled only for a verified server/model combination. Local model loading and serving remain external to the package.
 
-Use either provider below in the same runtime configuration. The host supplies the model ID.
+## Execution limits and failures
 
-```ts
-import { OpenAIProvider } from "small-hour/providers/openai";
+| Configuration | Default |
+| --- | --- |
+| `timeoutMs` | 30,000 |
+| `maxHops` | 6 |
+| `retry.attempts` | 3 |
+| `maxModelCalls` | `maxHops × retry.attempts` |
+| `maxTokens` | 512 |
+| `maxToolResultCharacters` | 4,000 |
 
-const provider = new OpenAIProvider({
-  model: process.env.OPENAI_MODEL!,
-  apiKey: process.env.OPENAI_API_KEY!,
-});
-```
+`maxModelCalls` counts provider attempts across all hops and retries. The turn deadline covers context loading, provider calls, retry waits, tools, and callbacks. Oversized tool results fail unless `toolResultOverflow` supplies a bounded replacement; the runtime does not truncate results automatically.
 
-The OpenAI adapter uses stateless Responses requests with `store: false`. Native reasoning data and message
-phases stay intact through tool exchanges within the turn. Use its optional `reasoningEffort` setting for
-compatible reasoning models. `maxTokens` caps total generated tokens, including reasoning; a numeric
-`thinking.budgetTokens` is not translated into an OpenAI effort level.
+Token limits follow provider semantics: Anthropic adds an explicit thinking budget to `maxTokens`; OpenAI includes reasoning in that limit and uses the adapter's `reasoningEffort` option instead of a numeric thinking budget.
 
-```ts
-import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
+Reports retain model attempts, known usage, accepted choices, tool outcomes, and consumer-supplied receipt IDs. Tool outcomes distinguish `not_started`, `completed`, and `unknown`. A write failure after execution starts ends the turn with `tool_outcome_unknown`. Incomplete provider output fails; output rejection does not replay the turn.
 
-const provider = new OpenAICompatibleProvider({
-  model: process.env.LOCAL_MODEL!,
-  baseURL: "http://127.0.0.1:11434/v1",
-  capabilities: { tools: true, structuredOutput: true },
-});
-```
+Reports are in-memory snapshots. Cancellation prevents new work but cannot undo effects or forcibly interrupt implementations that ignore the signal. A completed tool call does not independently establish durable persistence or delivery.
 
-That URL is Ollama's usual local endpoint. LM Studio normally uses `http://127.0.0.1:1234/v1`.
-Set capabilities only after verifying that the server and loaded model support them; both default to `false`.
-Text-only turns work without enabling either. Local models must be served through the compatible HTTP API;
-Small Hour does not load model files or start a model server. An optional `apiKey` supports authenticated servers
-and is never filled from OpenAI environment variables.
+## Consumer responsibilities
 
-Both adapters make one HTTP request per attempt and leave retries, admission, accounting, and cancellation to
-the runtime. Neither switches providers, follows HTTP redirects, or adds fallback model calls. See the
-[provider contracts](docs/embedding.md#provider-adapters) for capability and failure details.
+- **Context and memory:** implement retrieval, selection, size bounds, persistence, retention, and privacy policy. The runtime stores no cross-turn conversation or long-term memory.
+- **Identity and authorization:** authenticate callers and authorize data access and effects. `agentId` is a context key, not an authentication mechanism.
+- **Tools and validation:** implement tools, validate external inputs and domain constraints, and configure output acceptance. The default text policy accepts output; structured results always require a consumer parser.
+- **Durable effects and recovery:** persist effects and receipts, enforce idempotency, reconcile uncertain outcomes, and resume work after process loss. `recordReceipt()` only adds a reference to the turn report.
+- **Spending:** supply credentials, pricing, persistent budgets, and reservation/accounting policy through the available hooks. Independent model calls inside consumer tools or context loaders require separate budgeting.
+- **Application services:** provide scheduling, concurrency control for shared state, delivery, and user interfaces. No database, workflow engine, scheduler, or transport service is bundled.
 
-## Boundary
+See [security boundaries](docs/security.md).
 
-Small Hour owns:
+## Development status
 
-- one provider-neutral turn loop;
-- system-instruction and memory-source interfaces;
-- a tool registry with provider schemas, optional host parsers, and read/write modes;
-- a total model-call budget, retries, a turn deadline, usage records, and output-policy hooks;
-- per-attempt admission and accounting hooks, plus turn reports that survive failure;
-- optional structured choices with host authorization hooks for subsequent writes;
-- single-call structured results with mandatory host validation.
+Version 0.1.0. The API is under development.
 
-Text turns report `reply`, `silence`, or `rejected`; structured turns return `structured` and a typed `value`.
-Failed turns throw `RuntimeError` with a partial `report`: completed or uncertain tool calls, host receipt IDs,
-accepted choices, model attempts, and known usage. Partial `max_tokens` responses and tool calls with no
-remaining model-call capacity are never treated as successful output.
-
-It intentionally does not own persistence, channels, cron, secrets, authorization, long-term memory policy, or a workflow engine.
-
-## Host responsibilities
-
-Select and bound memory before returning it to the runtime. Tool results must fit the configured limit.
-Oversized results stop the turn unless `toolResultOverflow` supplies a complete, bounded replacement.
-The runtime never clips facts or selected IDs into a preview.
-
-Register only tools appropriate for the runtime's callers, validate their inputs, and enforce authorization inside their implementations. `allowedTools` limits both offered tools and actual dispatch; host authorization remains necessary.
-
-Persist consequential work in the host and make mutating tools idempotent. A rejected output or failed turn does not undo earlier tool effects. Durable recovery and delivery belong to the host application.
-
-Cancellation stops waiting and prevents new work; it cannot undo a running tool or provider request that ignores
-the signal. Reconcile uncertain outcomes in the host using the report's stable IDs. Reports are in-memory
-snapshots, so the host must persist receipts during execution if they need to survive a process crash.
+Run `npm run check` for type checking, behavioral tests, and the build. The checks cover runtime and provider contracts; live-model behavior and consumer integrations require separate verification.
