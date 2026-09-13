@@ -12,7 +12,7 @@ Implement `MemorySource.load()` with a hard bound: a fixed number of recent mess
 
 ## Tools
 
-Register only capabilities needed for the turn. `allowedTools` can narrow a shared registry further at call time. Validate model input with each tool's optional `parse` function, and make every state-changing implementation idempotent by `turnId` or `toolCallId`.
+Register only capabilities needed for the turn. `allowedTools` can narrow a shared registry further at call time. Validate model input with each tool's optional `parse` function. Assign stable application IDs to logical operations: one turn can contain multiple actions, and a repeated action may arrive with a different provider tool-call ID.
 
 Declare every tool as `mode: "read"` or `mode: "write"`. An omitted mode fails safe as `write`. Provider schemas
 are strict by default; schemas should close object inputs with `additionalProperties: false`, while `parse` remains
@@ -24,6 +24,10 @@ effects may already have occurred. Use `toolErrorMode: "throw"` to stop on all t
 
 After persisting an effect, a tool can call `context.recordReceipt("host-receipt-id")`. The report retains these
 host-selected references without copying the full tool result. This callback does not persist anything itself.
+
+For synchronous local database effects, the optional [SQLite operation store](local-operations.md) can commit
+application changes and the replayable result together. The tool supplies its validated operation contract and
+result parser. Model calls and remote effects remain outside that transaction; turn recovery is separate.
 
 Tool results are JSON-encoded and limited to `maxToolResultCharacters` (default 4,000). An oversized or
 unserializable result fails the turn while preserving the tool's completed status. Optional

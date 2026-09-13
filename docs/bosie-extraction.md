@@ -15,15 +15,16 @@ Small Hour begins from the live loop in Bosie's `server/runtime.ts`, but the pub
 | usage rows | `UsageSink` interface |
 | `bosie_choose` first-call decision | optional structured `choice` tool |
 | spoken-line scrub and length contract | `OutputPolicy` hook |
+| atomic local effect and replayable outcome | optional `SqliteOperationStore` |
 
 ## Stays in Bosie
 
-- SQLite schema and all queries;
+- game schema, queries, and connection ownership;
 - SOUL contents, voice rules, feral stance, and expression logic;
 - recent-window anti-parrot selection;
 - fan club, status, profile, notes, journal, and history endpoints;
 - channel delivery, moderation, proactive scheduling, and world clock;
-- action receipts, narration jobs, and every other durable workflow;
+- game receipt semantics, narration jobs, and workflow policy; the generic local transaction mechanism is available separately, and Bosie's callers have not adopted it;
 - model choice, prompt composition, and cost tables specific to Bosie.
 
 ## Adoption path
@@ -34,7 +35,7 @@ Small Hour begins from the live loop in Bosie's `server/runtime.ts`, but the pub
 4. Verify voice, tool ordering, latency, and token accounting before switching any live call.
 5. Pin Small Hour to a commit or version; never make Bosie follow an unpinned moving package.
 
-Publication remains separate from extraction. The repository is private and has no license until that decision is made.
+Package publication remains separate from extraction and requires the owner's decision.
 
 ## Generic hardening sync
 
