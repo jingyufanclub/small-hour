@@ -30,6 +30,8 @@ Re-entering a started or failed step throws `ModelStepError` with code `step_unr
 
 A process can die after a provider response arrives but before the result checkpoint commits. That remains an incomplete step, even if the report says `responded`. A progress report proves only the most recent saved boundary; it cannot recover unrecorded asynchronous completions. No universal exactly-once provider guarantee or unattended paid recovery is supplied.
 
+The optional [model-spending store](model-spending.md) keeps reservation and accounting state under the report's call IDs. Reuse the same budget scope for retries and authorized continuation steps. Completed-step replay makes no new reservation or charge; knowing a call's charge does not by itself resolve its unfinished model step.
+
 ## Transactions and storage
 
 Each start, changed progress snapshot, completion, or failure uses a short SQLite transaction. No transaction stays open across a model call or tool await. An existing outer transaction prevents the store from starting work: a provisional marker cannot guard an external call. The connection must also be outside an outer transaction when progress and completion are saved. Local-operation callbacks may use their own short transactions within a tool.
