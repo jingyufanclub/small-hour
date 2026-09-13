@@ -20,6 +20,10 @@
     "./providers/openai-compatible": {
       "types": "./dist/providers/openai-compatible.d.ts",
       "import": "./dist/providers/openai-compatible.js"
+    },
+    "./durable/sqlite": {
+      "types": "./dist/durable/sqlite.d.ts",
+      "import": "./dist/durable/sqlite.js"
     }
   },
   "files": [

@@ -2,7 +2,7 @@
 
 Small Hour is a provider-neutral TypeScript runtime for bounded LLM turns. It assembles consumer-supplied instructions and context, executes registered tools, applies output validation, and returns structured execution reports.
 
-The runtime owns execution within a turn. Consuming applications own persistent state, authorization, durable recovery, scheduling, and delivery.
+The runtime owns execution within a turn. An optional SQLite operation store commits local application effects and execution receipts atomically. Consuming applications define workflows, facts, authorization, memory policy, scheduling, and delivery.
 
 ## Capabilities
 
@@ -13,6 +13,7 @@ The runtime owns execution within a turn. Consuming applications own persistent 
 - Structured results with mandatory consumer validation and no tool loop.
 - Configurable model-call budgets, retries, deadlines, token limits, and tool-result limits.
 - Per-attempt admission and accounting hooks, token usage, and partial failure reports.
+- Transactional local operation receipts with scoped request identity, contract-conflict rejection, and validated result replay.
 
 The interface supports text, tool calls, and structured results. Streaming, image input, and audio input are not exposed.
 
@@ -33,6 +34,14 @@ For structured results, supply `structuredOutput` with a JSON Schema and a manda
 For a validated decision within a tool turn, configure `choice` with a parser and, where required, `authorizeWrite`. An accepted choice remains in the report if later work fails.
 
 See [embedding](docs/embedding.md) for the complete integration contracts.
+
+## Local operation receipts
+
+Import `SqliteOperationStore` from `small-hour/durable/sqlite` and pass an existing synchronous SQLite connection. Call `initialize()` explicitly to create the receipt table. The adapter accepts the `exec`, `prepare`, `get`, and `run` methods supplied by `node:sqlite` or `better-sqlite3`; connection lifecycle and configuration remain application-owned.
+
+`commit(request, { execute, parseResult })` binds `scope` and `id` to a `kind`, contract `version`, and JSON `input`. It executes synchronous application database work and stores the validated result in the same transaction. A duplicate returns the original `receipt` with `replayed: true`. `find(request, parseResult)` reads a completed receipt without executing work. Result parsers must validate and preserve the recorded JSON value.
+
+The application may stage pending output in the same transaction. An existing outer transaction controls final commit. This API does not checkpoint model calls, dispatch output, or make remote effects atomic. See [local operation contracts](docs/local-operations.md).
 
 ## Providers
 
@@ -70,9 +79,9 @@ Reports are in-memory snapshots. Cancellation prevents new work but cannot undo 
 - **Context and memory:** implement retrieval, selection, size bounds, persistence, retention, and privacy policy. The runtime stores no cross-turn conversation or long-term memory.
 - **Identity and authorization:** authenticate callers and authorize data access and effects. `agentId` is a context key, not an authentication mechanism.
 - **Tools and validation:** implement tools, validate external inputs and domain constraints, and configure output acceptance. The default text policy accepts output; structured results always require a consumer parser.
-- **Durable effects and recovery:** persist effects and receipts, enforce idempotency, reconcile uncertain outcomes, and resume work after process loss. `recordReceipt()` only adds a reference to the turn report.
+- **Durable effects and recovery:** use the optional SQLite store for atomic local operations, or supply equivalent persistence. Select stable scoped IDs, validate current facts and permissions, retain receipts for the duplicate-request window, and reconcile remote or uncertain work. Model-step recovery remains application-owned; `recordReceipt()` only adds a reference to the turn report.
 - **Spending:** supply credentials, pricing, persistent budgets, and reservation/accounting policy through the available hooks. Independent model calls inside consumer tools or context loaders require separate budgeting.
-- **Application services:** provide scheduling, concurrency control for shared state, delivery, and user interfaces. No database, workflow engine, scheduler, or transport service is bundled.
+- **Application services:** provide the database connection, scheduling, concurrency policy, delivery, and user interfaces. No database server, workflow worker, scheduler, or transport service is bundled.
 
 See [security boundaries](docs/security.md).
 
@@ -80,4 +89,4 @@ See [security boundaries](docs/security.md).
 
 Version 0.1.0. The API is under development.
 
-Run `npm run check` for type checking, behavioral tests, and the build. The checks cover runtime and provider contracts; live-model behavior and consumer integrations require separate verification.
+Use Node.js 22.13 or later to run `npm run check` for type checking, behavioral tests, and the build. SQLite tests use `node:sqlite`; runtime imports remain compatible with Node.js 20 and a consumer-supplied SQLite driver. The checks cover runtime, provider, and local transaction contracts; live-model behavior and consumer integrations require separate verification.
