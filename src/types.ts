@@ -152,6 +152,10 @@ export interface ToolCallRecord {
   errorCode?: string;
 }
 
+export interface TurnObserver {
+  checkpoint(report: Readonly<TurnReport>): void | Promise<void>;
+}
+
 export interface TurnInputBase {
   agentId: string;
   input: string;

@@ -27,7 +27,7 @@ host-selected references without copying the full tool result. This callback doe
 
 For synchronous local database effects, the optional [SQLite operation store](local-operations.md) can commit
 application changes and the replayable result together. The tool supplies its validated operation contract and
-result parser. Model calls and remote effects remain outside that transaction; turn recovery is separate.
+result parser. Model calls and remote effects remain outside that transaction; completed-turn replay is available through [model-step checkpoints](model-steps.md).
 
 Tool results are JSON-encoded and limited to `maxToolResultCharacters` (default 4,000). An oversized or
 unserializable result fails the turn while preserving the tool's completed status. Optional
@@ -118,6 +118,10 @@ The signal is also aborted when the turn finishes, so a failed context load canc
 Cooperative asynchronous work can be cancelled; synchronous code that blocks the JavaScript event loop cannot
 be forcibly interrupted, but elapsed time is checked before starting more work or returning success. Reports do
 not update with late completions and cannot replace durable host receipts.
+
+## Durable model steps
+
+The optional [model-step store](model-steps.md) records execution before entering this loop and persists completed results and available progress. Completed replay bypasses the loop; incomplete execution stops for application reconciliation. Keep application-defined choices and consequential local operations in explicit steps when they need separate recovery boundaries. The core runtime retains no cross-turn state when the store is unused.
 
 ## Adopting these contracts
 

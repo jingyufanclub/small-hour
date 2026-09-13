@@ -6,7 +6,7 @@ Keep ownership explicit:
 
 - The application owns workflow definitions, domain facts, authorization, memory selection, secrets, side-effect implementations, and product behavior. Models perform the interpretation, selection, and generation tasks assigned by the application.
 - The runtime owns the provider call loop, within-turn tool dispatch, retries, timeouts, usage reporting, and output checks.
-- Durable components are opt-in and share the application's storage and transactions. Local operation receipts own atomic replay; they do not imply durable model steps, scheduling, or delivery.
+- Durable components are opt-in and share the application's storage and transactions. Local operation receipts own atomic local replay. Model-step checkpoints preserve completed results and available progress; incomplete work requires application reconciliation. Neither component owns scheduling or delivery.
 - New durable state, workers, recovery policies, and adapters require a selected, bounded Linear contract. Give each effect and retry one authority; SDK retries stay disabled. Preserve accepted IDs and results through recovery.
 - Never add unrestricted shell, filesystem, browser, channel, or credential access, autonomous task creation, model-authored workflows, or self-written skills.
 - Never add a growing transcript store. Memory is supplied fresh by the host on every turn.

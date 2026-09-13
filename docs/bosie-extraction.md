@@ -16,6 +16,7 @@ Small Hour begins from the live loop in Bosie's `server/runtime.ts`, but the pub
 | `bosie_choose` first-call decision | optional structured `choice` tool |
 | spoken-line scrub and length contract | `OutputPolicy` hook |
 | atomic local effect and replayable outcome | optional `SqliteOperationStore` |
+| saved presentation output and interrupted-attempt evidence | optional `SqliteModelStepStore` |
 
 ## Stays in Bosie
 
@@ -24,7 +25,7 @@ Small Hour begins from the live loop in Bosie's `server/runtime.ts`, but the pub
 - recent-window anti-parrot selection;
 - fan club, status, profile, notes, journal, and history endpoints;
 - channel delivery, moderation, proactive scheduling, and world clock;
-- game receipt semantics, narration jobs, and workflow policy; the generic local transaction mechanism is available separately, and Bosie's callers have not adopted it;
+- game receipt semantics, narration jobs, and workflow policy; generic local transactions and model-step checkpoints are available separately, and Bosie's callers have not adopted it;
 - model choice, prompt composition, and cost tables specific to Bosie.
 
 ## Adoption path
