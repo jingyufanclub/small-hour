@@ -17,6 +17,7 @@ Small Hour assumes model input and model output are untrusted.
 - Oversized tool results fail unless the host supplies a bounded replacement. Compaction must preserve necessary evidence.
 - Turn reports and `recordReceipt()` references describe known progress; they do not roll back effects. Reconcile uncertain tools, model calls, and unrecorded accounting before retrying.
 - The optional SQLite operation store makes participating local writes and their receipt atomic. It does not authenticate scopes, authorize receipt disclosure, or cover remote effects. Application authorization remains required before committing work or returning saved results.
+- The optional model-step store persists explicit contracts, input text, tool arguments, progress and results. Restrict access and retention as application data. Replaying a completed result grants no new permission; incomplete steps require reconciliation before new execution. The store does not automatically retain model context or provider-native history.
 - OpenAI and compatible HTTP adapters make one request per attempt, reject redirects, and never switch to a fallback provider. A compatible endpoint receives only its explicitly supplied API key.
 - Choose a trusted provider endpoint and declare its actual tool/schema capabilities. Native provider history is opaque context for that same adapter and must not be modified or mixed across providers.
 

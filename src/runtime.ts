@@ -10,7 +10,7 @@ import {
   RuntimeError, type AssistantBlock, type ModelCallHooks, type ModelProvider, type ProviderMessage,
   type StructuredTurnInput, type StructuredTurnResult, type SystemBlock, type ToolCallRecord,
   type ToolResultBlock, type ToolResultOverflowContext, type TurnContext, type TurnInput,
-  type TurnReport, type TurnResult,
+  type TurnReport, type TurnResult, type TurnObserver,
 } from "./types.js";
 import { NoopUsageSink, type UsageSink } from "./usage.js";
 
@@ -100,13 +100,26 @@ export class SmallHourRuntime {
     return content;
   }
 
-  async turn<TValue>(input: StructuredTurnInput<TValue>): Promise<StructuredTurnResult<TValue>>;
-  async turn<TChoice = unknown>(input: TurnInput<TChoice>): Promise<TurnResult<TChoice>>;
-  async turn<TChoice, TValue>(input: TurnInput<TChoice> | StructuredTurnInput<TValue>): Promise<TurnResult<TChoice> | StructuredTurnResult<TValue>> {
+  async turn<TValue>(input: StructuredTurnInput<TValue>, observer?: TurnObserver): Promise<StructuredTurnResult<TValue>>;
+  async turn<TChoice = unknown>(input: TurnInput<TChoice>, observer?: TurnObserver): Promise<TurnResult<TChoice>>;
+  async turn<TChoice, TValue>(input: TurnInput<TChoice> | StructuredTurnInput<TValue>, observer?: TurnObserver): Promise<TurnResult<TChoice> | StructuredTurnResult<TValue>> {
     const timeout = turnDeadline(input.signal, this.timeoutMs);
     const context: TurnContext = { agentId: input.agentId, turnId: input.turnId ?? randomUUID(), input: input.input, signal: timeout.signal };
     const report: TurnReport<TChoice> = { agentId: context.agentId, turnId: context.turnId, toolCalls: [], modelCalls: [], usage: [], hops: 0 };
     const { signal } = context;
+    const checkpoint = async () => {
+      if (!observer) return;
+      try { await timeout.run(() => observer.checkpoint(structuredClone(report))); }
+      catch (cause) {
+        timeout.check();
+        throw new RuntimeError("turn checkpoint failed", "checkpoint_failed", { cause });
+      }
+    };
+    const checkpointToolStart = async (call: ToolCallRecord) => {
+      call.status = "unknown";
+      try { await checkpoint(); }
+      catch (cause) { call.status = "not_started"; throw cause; }
+    };
     try {
       timeout.check();
       if (!input.agentId.trim() || !context.turnId.trim()) throw new TypeError("agentId and turnId are required");
@@ -141,7 +154,7 @@ export class SmallHourRuntime {
           maxTokens: input.maxTokens ?? this.maxTokens,
           ...(input.thinking ? { thinking: { enabled: true as const, budgetTokens: input.thinking.budgetTokens } } : {}),
           ...(input.structuredOutput ? { outputSchema: input.structuredOutput.schema } : {}), signal,
-        }, context, report, { retry: this.retry, maxModelCalls: this.maxModelCalls, hooks: this.options.modelCalls, deadline: timeout });
+        }, context, report, { retry: this.retry, maxModelCalls: this.maxModelCalls, hooks: this.options.modelCalls, deadline: timeout, checkpoint: observer ? checkpoint : undefined });
         if (response.usage) await timeout.run(() => this.usage.record(response.usage!, context));
         const said = textFrom(response.content);
         const requested = response.content.filter((block): block is Extract<AssistantBlock, { type: "tool_use" }> => block.type === "tool_use");
@@ -156,6 +169,7 @@ export class SmallHourRuntime {
           id: request.id, name: request.name, input: structuredClone(request.input), ok: false, status: "not_started", receiptIds: [],
         }));
         report.toolCalls.push(...pending);
+        if (pending.length) await checkpoint();
         if (response.stopReason === "refusal") throw new RuntimeError("provider refused the request", "provider_refused");
         if (response.stopReason === "content_filter") throw new RuntimeError("provider filtered the response", "provider_filtered");
         if (input.structuredOutput && (requested.length || response.stopReason === "tool_use")) throw new RuntimeError("structured output returned a tool call", "unexpected_tool_use");
@@ -197,8 +211,9 @@ export class SmallHourRuntime {
               value = await timeout.run(() => input.choice!.parse ? input.choice!.parse(request.input) : request.input as TChoice);
               if (value === undefined) throw new RuntimeError("choice cannot be undefined", "choice_invalid");
               report.choice = structuredClone(value as TChoice);
+              await checkpoint();
               if (input.choice.onChoice) {
-                call.status = "unknown";
+                await checkpointToolStart(call);
                 await timeout.run(() => input.choice!.onChoice!(structuredClone(report.choice!), context));
               }
               value = { ok: true, chosen: structuredClone(report.choice) };
@@ -217,12 +232,14 @@ export class SmallHourRuntime {
                   if (typeof receiptId !== "string" || !receiptId.trim()) throw new TypeError("receiptId must be a nonempty string");
                   call.receiptIds.push(receiptId);
                 },
-              }, () => { timeout.check(); call.status = "unknown"; }));
+              }, () => { timeout.check(); return checkpointToolStart(call); }));
             }
             call.status = "completed";
             call.ok = true;
+            await checkpoint();
           } catch (error) {
             timeout.check();
+            if (error instanceof RuntimeError && error.code === "checkpoint_failed") throw error;
             call.errorCode = error instanceof RuntimeError ? error.code : "tool_failed";
             if (call.status === "unknown" && mode === "write") throw new RuntimeError(`tool ${request.name} may have caused effects`, "tool_outcome_unknown", { cause: error });
             if ((request.name === choiceName && report.choice !== undefined) || this.options.toolErrorMode === "throw") throw new RuntimeError(`tool ${request.name} failed`, "tool_failed", { cause: error });

@@ -11,7 +11,7 @@ export async function completeModelCall(
   request: ProviderRequest,
   context: TurnContext,
   report: TurnReport,
-  options: { retry: RetryPolicy; maxModelCalls: number; hooks?: ModelCallHooks; deadline: TurnDeadline },
+  options: { retry: RetryPolicy; maxModelCalls: number; hooks?: ModelCallHooks; deadline: TurnDeadline; checkpoint?: () => Promise<void> },
 ): Promise<ProviderResponse> {
   const { signal } = context;
   const { deadline } = options;
@@ -29,6 +29,7 @@ export async function completeModelCall(
         status: "not_started", accounting: "unrecorded",
       };
       report.modelCalls.push(call);
+      await options.checkpoint?.();
       if (options.hooks?.admit) {
         let admitted: boolean;
         try { admitted = await deadline.run(() => options.hooks!.admit!(callContext)); }
@@ -51,6 +52,11 @@ export async function completeModelCall(
       };
 
       let response: ProviderResponse;
+      if (options.checkpoint) {
+        call.status = "unknown";
+        try { await options.checkpoint(); }
+        finally { call.status = "not_started"; }
+      }
       try {
         response = await deadline.run(() => {
           call.status = "unknown";
@@ -61,7 +67,9 @@ export async function completeModelCall(
         const info = provider.failureInfo?.(error);
         call.status = info?.status ?? "unknown";
         call.requestId = info?.requestId;
+        await options.checkpoint?.();
         await record();
+        if (options.hooks?.record) await options.checkpoint?.();
         throw new ProviderFailure("provider failed", { cause: error });
       }
       call.status = "responded";
@@ -70,7 +78,9 @@ export async function completeModelCall(
         call.usage = { ...response.usage };
         report.usage.push({ ...response.usage });
       }
+      await options.checkpoint?.();
       await record();
+      if (options.hooks?.record) await options.checkpoint?.();
       return response;
     }, {
       ...options.retry,

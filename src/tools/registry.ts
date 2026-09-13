@@ -56,13 +56,14 @@ export class ToolRegistry {
     return definition.mode ?? "write";
   }
 
-  async execute(name: string, input: unknown, context: ToolContext, onStart?: () => void): Promise<unknown> {
+  async execute(name: string, input: unknown, context: ToolContext, onStart?: () => void | Promise<void>): Promise<unknown> {
     checkAbort(context.signal);
     const definition = this.definitions.get(name);
     if (!definition) throw new Error(`unknown tool: ${name}`);
     const parsed = definition.parse ? definition.parse(input) : input;
     checkAbort(context.signal);
-    onStart?.();
+    await onStart?.();
+    checkAbort(context.signal);
     return await definition.execute(parsed, context);
   }
 }
