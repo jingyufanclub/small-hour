@@ -2,7 +2,7 @@
 
 Small Hour is a provider-neutral TypeScript runtime for bounded LLM turns. It assembles consumer-supplied instructions and context, executes registered tools, applies output validation, and returns structured execution reports.
 
-The runtime owns execution within a turn. Optional SQLite stores commit local effects with their receipts and preserve completed model steps across restarts. Consuming applications define workflows, facts, authorization, memory policy, scheduling, and delivery.
+The runtime owns execution within a turn. Optional SQLite stores commit local effects with their receipts, preserve completed model steps, and retain model-spending reservations across restarts. Consuming applications define workflows, facts, authorization, memory policy, scheduling, and delivery.
 
 ## Capabilities
 
@@ -15,6 +15,7 @@ The runtime owns execution within a turn. Optional SQLite stores commit local ef
 - Per-attempt admission and accounting hooks, token usage, and partial failure reports.
 - Transactional local operation receipts with scoped request identity, contract-conflict rejection, and validated result replay.
 - Versioned model-step checkpoints with exact completed-result replay, persistent progress reports, and explicit handling of incomplete execution.
+- Durable model-spending admission, settlement and inspection with application-defined scopes, limits and pricing.
 
 The interface supports text, tool calls, and structured results. Streaming, image input, and audio input are not exposed.
 
@@ -51,6 +52,12 @@ Import `SqliteModelStepStore` from `small-hour/durable/sqlite`, supply an existi
 A started record commits before execution. The runtime checkpoints progress, and the completed result commits before it is returned. Repeated completed steps return the saved result without another model or tool call. `inspect(request)` exposes started, failed, and completed states with their available reports. Incomplete steps throw `step_unresolved` and require application reconciliation; the store does not automatically repeat them.
 
 Result and choice validators must preserve saved JSON values. Applications supply relevant context and policy revisions in the step contract and authorize downstream effects and disclosure. Model steps require short independent transactions; they cannot run inside an application's outer transaction. See [model-step contracts](docs/model-steps.md).
+
+## Model spending
+
+Import `SqliteModelSpendStore` from `small-hour/durable/sqlite`, supply an existing synchronous SQLite connection, and call `initialize()`. Configure the runtime with `modelCalls: store.hooks(policy)`. The policy supplies a scope, limit, reservation amount and pricing snapshot through `quote(context)`, and calculates charges through `charge(usage, pricing)`.
+
+Each provider attempt requires a committed reservation. Retries and new steps sharing a scope consume the same persisted budget. Known charges replace reservations; missing usage and uncertain outcomes retain them. `inspect(callId)` and `inspectBudget(scope)` expose accounting state. `reconcile(callId, outcome)` resolves uncertain spending using application-verified evidence. Amounts use application-defined integer units, and conservative reservation estimates remain the application's responsibility. See [model-spending contracts](docs/model-spending.md).
 
 ## Providers
 
@@ -89,7 +96,7 @@ Core turn reports are in-memory snapshots; the optional model-step store persist
 - **Identity and authorization:** authenticate callers and authorize data access and effects. `agentId` is a context key, not an authentication mechanism.
 - **Tools and validation:** implement tools, validate external inputs and domain constraints, and configure output acceptance. The default text policy accepts output; structured results always require a consumer parser.
 - **Durable effects and recovery:** use the optional SQLite store for atomic local operations, or supply equivalent persistence. Select stable scoped IDs, validate current facts and permissions, retain receipts for the duplicate-request window, and reconcile remote or uncertain work. Use the optional model-step store to preserve completed turns; applications define continuation and reconcile incomplete work. `recordReceipt()` only adds a reference to the turn report.
-- **Spending:** supply credentials, pricing, persistent budgets, and reservation/accounting policy through the available hooks. Independent model calls inside consumer tools or context loaders require separate budgeting.
+- **Spending:** supply credentials, scopes, current limits, conservative reservation estimates, pricing and reconciliation evidence. Use the optional spending store or equivalent hooks for persistent accounting. Independent model calls inside consumer tools or context loaders require separate budgeting.
 - **Application services:** provide the database connection, scheduling, concurrency policy, delivery, and user interfaces. No database server, workflow worker, scheduler, or transport service is bundled.
 
 See [security boundaries](docs/security.md).
@@ -98,4 +105,4 @@ See [security boundaries](docs/security.md).
 
 Version 0.1.0. The API is under development.
 
-Use Node.js 22.13 or later to run `npm run check` for type checking, behavioral tests, and the build. SQLite tests use `node:sqlite`; runtime imports remain compatible with Node.js 20 and a consumer-supplied SQLite driver. The checks cover runtime, provider, local transaction, and model-step restart contracts; live-model behavior and consumer integrations require separate verification.
+Use Node.js 22.13 or later to run `npm run check` for type checking, behavioral tests, and the build. SQLite tests use `node:sqlite`; runtime imports remain compatible with Node.js 20 and a consumer-supplied SQLite driver. The checks cover runtime, provider, local transaction, model-step restart and durable-spending contracts; live-model behavior and consumer integrations require separate verification.

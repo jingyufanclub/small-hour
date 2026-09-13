@@ -97,7 +97,8 @@ leave effects uncertain. Keep known receipts and reconcile with the host's autho
 
 `maxModelCalls` caps provider attempts across all hops and retries. It defaults to `maxHops * retry.attempts`
 (18 with default settings). Tools require capacity for a following model call. This bounds calls, not money;
-the host still owns prices, reservations, and per-user limits.
+the host still owns prices, reservation estimates, and per-user limits. The optional [model-spending store](model-spending.md)
+provides committed reservations, settlement, inspection and explicit reconciliation through these same hooks.
 
 Optional `modelCalls.admit(context)` must return exactly `true` before each attempt. Its context includes a
 unique `callId`, agent/turn IDs, provider/model, attempt, hop, and requested token limits. Use that ID to reserve
