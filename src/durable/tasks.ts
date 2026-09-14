@@ -3,6 +3,7 @@ import { types } from "node:util";
 import type { SmallHourRuntime } from "../runtime.js";
 import type { StructuredTurnInput, TurnInput } from "../types.js";
 import { canonicalJson } from "./json.js";
+import { DeliveryLedger, acceptedDelivery, conflictingDeliveryReceipts, deliveryKey, type DeliverySink, type DeliveryState, type DeliveryOutcome } from "./delivery.js";
 import { SqliteModelStepStore, type ModelStepState } from "./model-steps.js";
 import { SqliteOperationStore, type OperationRequest, type SqliteDatabase } from "./sqlite.js";
 
@@ -20,6 +21,7 @@ export interface TaskContext {
 export type TaskStep<Database> = { id: string } & (
   | { kind: "local"; execute(database: Database, context: TaskContext): unknown; parseResult(value: unknown): unknown }
   | { kind: "model"; prepare(context: TaskContext): { runtime: SmallHourRuntime; input: TurnInput | StructuredTurnInput<unknown> } }
+  | { kind: "delivery"; sink: DeliverySink }
 );
 export interface TaskWorkflow<Database> {
   kind: string;
@@ -29,16 +31,21 @@ export interface TaskWorkflow<Database> {
   retry?(error: unknown, context: TaskContext): { dueAt: number; reason: string } | undefined;
 }
 export interface TaskResolution { status: "failed" | "cancelled"; reason: string; evidence: unknown }
+type CompletedDelivery = Extract<DeliveryState, { status: "accepted" | "confirmed" }>;
 type CompletedModelStep = Extract<ModelStepState, { status: "completed" }>;
 export type TaskStepState = {
   id: string;
   request: OperationRequest;
 } & (
-  | { kind: "local"; model?: never } & ({ status: "not_started"; result?: never } | { status: "completed"; result: unknown })
-  | { kind: "model" } & (
+  | { kind: "local"; model?: never; delivery?: never } & ({ status: "not_started"; result?: never } | { status: "completed"; result: unknown })
+  | { kind: "model"; delivery?: never } & (
     | { status: "not_started"; model?: never; result?: never }
     | { status: "unresolved"; model: Exclude<ModelStepState, CompletedModelStep>; result?: never }
     | { status: "completed"; model: CompletedModelStep; result: CompletedModelStep["result"] }
+  )
+  | { kind: "delivery"; model?: never; result?: never } & (
+    | { status: "completed"; delivery: CompletedDelivery }
+    | { status: "not_started" | "unresolved"; delivery: Exclude<DeliveryState, CompletedDelivery> }
   )
 );
 export interface TaskState extends OperationRequest, TaskSchedule {
@@ -59,7 +66,7 @@ export class TaskError extends Error {
 }
 type Stop = { status: "cancelled" | "rejected" | "deferred"; reason: string; dueAt?: number };
 class TaskStopped extends Error { constructor(readonly outcome: Stop) { super(outcome.reason); } }
-type Plan = { id: string; kind: "local" | "model" }[];
+type Plan = ({ id: string; kind: "local" | "model" } | { id: string; kind: "delivery"; idempotency: "key" | "none"; reconciliation: boolean })[];
 type StoredTask = Omit<TaskState, "steps"> & { plan: Plan; token: string | null; scheduleJson: string };
 type Key = Pick<OperationRequest, "scope" | "id">;
 
@@ -80,13 +87,22 @@ function schedule(value: TaskSchedule): TaskSchedule {
   nonempty(value.concurrencyScope); integer(value.dueAt); integer(value.maxAttempts, 1);
   return { concurrencyScope: value.concurrencyScope, dueAt: value.dueAt, maxAttempts: value.maxAttempts };
 }
-function plan(steps: readonly { id: string; kind: string }[]): Plan {
+function plan(steps: readonly { id: string; kind: string; sink?: DeliverySink; idempotency?: string; reconciliation?: boolean }[]): Plan {
   if (!Array.isArray(steps) || !steps.length) throw new TypeError("A workflow requires ordered steps");
   const ids = new Set<string>();
   return steps.map(step => {
     nonempty(step.id);
-    if (ids.has(step.id) || (step.kind !== "local" && step.kind !== "model")) throw new TypeError("Invalid or repeated step");
-    ids.add(step.id); return { id: step.id, kind: step.kind };
+    if (ids.has(step.id)) throw new TypeError("Repeated step");
+    ids.add(step.id);
+    if (step.kind === "delivery") {
+      if (steps.length !== 1) throw new TypeError("A delivery workflow must contain only its fixed output handoff");
+      const idempotency = step.sink ? step.sink.idempotency : step.idempotency;
+      const reconciliation = step.sink ? typeof step.sink.reconcile === "function" : step.reconciliation;
+      if ((idempotency !== "key" && idempotency !== "none") || typeof reconciliation !== "boolean") throw new TypeError("Invalid delivery contract");
+      return { id: step.id, kind: step.kind, idempotency, reconciliation };
+    }
+    if (step.kind !== "local" && step.kind !== "model") throw new TypeError("Invalid step");
+    return { id: step.id, kind: step.kind };
   });
 }
 function identity(task: OperationRequest): OperationRequest {
@@ -102,6 +118,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
   private readonly workflows: TaskWorkflow<Database>[];
   private readonly operations: SqliteOperationStore<Database>;
   private readonly models: SqliteModelStepStore;
+  private readonly deliveries: DeliveryLedger;
   private readonly leaseMs: number;
   private readonly now: () => number;
 
@@ -115,15 +132,20 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       if (keys.has(key)) throw new TypeError("Repeated workflow version");
       keys.add(key);
       const callbacks = [workflow.authorize, ...(workflow.retry ? [workflow.retry] : []),
-        ...workflow.steps.flatMap<unknown>(step => step.kind === "local" ? [step.execute, step.parseResult] : [step.prepare])];
+        ...workflow.steps.flatMap<unknown>(step => step.kind === "local" ? [step.execute, step.parseResult] : step.kind === "model" ? [step.prepare] : [])];
       if (callbacks.some(callback => typeof callback !== "function" || types.isAsyncFunction(callback))) throw new TypeError("Task definitions require synchronous callbacks");
-      return { ...workflow, steps: workflow.steps.map(step => ({ ...step })) };
+      for (const step of workflow.steps) if (step.kind === "delivery" && (typeof step.sink.send !== "function"
+        || (step.sink.reconcile !== undefined && typeof step.sink.reconcile !== "function") || workflow.retry)) throw new TypeError("Delivery retries require sink evidence");
+      return { ...workflow, steps: workflow.steps.map(step => step.kind === "delivery" ? { ...step, sink: {
+        idempotency: step.sink.idempotency, send: step.sink.send.bind(step.sink), reconcile: step.sink.reconcile?.bind(step.sink),
+      } } : { ...step }) };
     });
     this.operations = new SqliteOperationStore(database); this.models = new SqliteModelStepStore(database);
+    this.deliveries = new DeliveryLedger(database);
   }
 
   initialize(): void {
-    this.operations.initialize(); this.models.initialize();
+    this.operations.initialize(); this.models.initialize(); this.deliveries.initialize();
     this.database.exec(`CREATE TABLE IF NOT EXISTS small_hour_tasks (
       scope TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, version TEXT NOT NULL,
       input_json TEXT NOT NULL, plan_json TEXT NOT NULL, schedule_json TEXT NOT NULL,
@@ -141,7 +163,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     catch (cause) { throw new TaskError("invalid_request", "Tasks require a scoped versioned identity, JSON input and a bounded schedule.", { cause }); }
     const workflow = this.definition(selected);
     const expectedPlan = canonicalJson(plan(workflow.steps)), expectedSchedule = canonicalJson(selectedSchedule);
-    this.transaction(() => {
+    this.savepoint(() => {
       const existing = this.read(selected);
       if (existing) {
         if (canonicalJson(identity(existing)) !== canonicalJson(selected) || canonicalJson(existing.plan) !== expectedPlan || existing.scheduleJson !== expectedSchedule) {
@@ -169,7 +191,20 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     if (!task) return undefined;
     const { plan, token: _token, scheduleJson: _schedule, ...state } = task;
     const steps: TaskStepState[] = plan.map(step => {
-      const request = operation(task, step);
+      const request = step.kind === "delivery" ? identity(task) : operation(task, step);
+      if (step.kind === "delivery") {
+        let delivery = this.deliveries.inspect(task);
+        if (delivery.attempts.length > task.attempts) throw new TaskError("invalid_task", "Delivery attempts exceed task claims.");
+        if (!acceptedDelivery(delivery) && delivery.status !== "uncertain" && ["rejected", "deferred", "cancelled"].includes(state.status)
+          && (delivery.status !== state.status || !("reason" in delivery) || delivery.reason !== state.reason
+            || (delivery.status === "deferred" && delivery.dueAt !== state.dueAt))) {
+          const attempts = delivery.attempts;
+          delivery = state.status !== "deferred" ? { attempts, status: "rejected", reason: state.reason!, evidence: { authority: "task_policy" } }
+            : { attempts, status: "deferred", reason: state.reason!, dueAt: state.dueAt, evidence: { authority: "task_policy" } };
+        }
+        return acceptedDelivery(delivery) ? { id: step.id, kind: "delivery", request, delivery, status: "completed" }
+          : { id: step.id, kind: "delivery", request, delivery, status: delivery.attempts.length ? "unresolved" : "not_started" };
+      }
       if (step.kind === "local") {
         const receipt = this.operations.find(request, value => value);
         return receipt ? { id: step.id, kind: "local", request, status: "completed", result: receipt.result }
@@ -193,10 +228,10 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     nonempty(reason);
     this.transaction(() => {
       const task = this.required(key);
-      if (!["queued", "deferred", "running"].includes(task.status)) return;
+      if (!["queued", "deferred", "running"].includes(task.status) && !(task.status === "uncertain" && task.plan[0].kind === "delivery")) return;
       this.changed(this.database.prepare(`UPDATE small_hour_tasks SET cancellation_reason = ?,
-        status = CASE WHEN status = 'running' THEN status ELSE 'cancelled' END,
-        reason = CASE WHEN status = 'running' THEN reason ELSE ? END WHERE scope = ? AND id = ?`)
+        status = CASE WHEN status IN ('running', 'uncertain') THEN status ELSE 'cancelled' END,
+        reason = CASE WHEN status IN ('running', 'uncertain') THEN reason ELSE ? END WHERE scope = ? AND id = ?`)
         .run(task.cancellationReason ?? reason, task.cancellationReason ?? reason, key.scope, key.id));
     });
     return this.inspect(key)!;
@@ -220,8 +255,12 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     if (options.signal?.aborted) return undefined;
     const claimed = this.claim();
     if (!claimed) return undefined;
+    return this.executeClaimed(claimed, options);
+  }
+
+  private async executeClaimed(claimed: StoredTask, options: { signal?: AbortSignal }): Promise<TaskRunResult | undefined> {
     if (claimed.status !== "running") return this.inspect(claimed);
-    if (this.inspect(claimed)!.steps.some(step => step.status === "unresolved")) {
+    if (this.inspect(claimed)!.steps.some(step => step.kind === "model" && step.status === "unresolved")) {
       return this.finish(claimed, "uncertain", "model_step_unresolved");
     }
     const workflow = this.definition(claimed);
@@ -243,7 +282,10 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         this.active(claimed);
       } catch (error) { if (error instanceof TaskStopped) stopped = error; throw error; }
     };
+    const deliveryStep = workflow.steps[0];
+    if (deliveryStep.kind === "delivery") return this.dispatchDelivery(claimed, deliveryStep.sink, assertActive, options.signal);
     for (const step of workflow.steps) {
+      if (step.kind === "delivery") throw new TaskError("invalid_task", "Unexpected delivery step");
       stepId = step.id;
       const request = operation(claimed, step);
       let localAttempt = false;
@@ -298,25 +340,95 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     return this.finish(claimed, "completed", null);
   }
 
-  private claim(): StoredTask | undefined {
+  async retryDelivery(key: Key, options: { signal?: AbortSignal } = {}): Promise<TaskRunResult | undefined> {
+    if (options.signal?.aborted) return undefined;
+    const task = this.required(key), workflow = this.definition(task), step = workflow.steps[0];
+    if (step.kind !== "delivery") throw new TaskError("invalid_request", "Only fixed-output delivery tasks support delivery recovery.");
+    if (task.status !== "uncertain") return this.inspect(task);
+    const state = this.deliveries.inspect(task);
+    if (state.status === "uncertain" && (conflictingDeliveryReceipts(state.attempts) || (step.sink.idempotency === "none" && !step.sink.reconcile))) return this.inspect(task);
+    const claimed = this.claim(key);
+    return claimed ? this.executeClaimed(claimed, options) : undefined;
+  }
+
+  recordDeliveryOutcome(key: Key, record: { attemptId: string; outcome: DeliveryOutcome }): TaskState {
+    this.transaction(() => {
+      const task = this.required(key);
+      if (task.plan[0].kind !== "delivery") throw new TaskError("invalid_request", "This task does not deliver a fixed output.");
+      this.deliveries.record(task, record.attemptId, record.outcome);
+    });
+    return this.inspect(key)!;
+  }
+
+  private async dispatchDelivery(task: StoredTask, sink: DeliverySink, assertActive: () => void, signal?: AbortSignal): Promise<TaskRunResult> {
+    let state = this.deliveries.inspect(task);
+    const finish = (): TaskRunResult => {
+      state = this.deliveries.inspect(task);
+      if (acceptedDelivery(state)) return this.finish(task, "completed", null);
+      if (state.status === "deferred") return this.finish(task, task.attempts < task.maxAttempts ? "deferred" : "failed",
+        task.attempts < task.maxAttempts ? state.reason : "attempt_limit", state.dueAt);
+      if (state.status === "rejected") return this.finish(task, "rejected", state.reason);
+      return this.finish(task, "uncertain", state.status === "uncertain" ? state.reason : "delivery_unresolved");
+    };
+    const context = { idempotencyKey: deliveryKey(task), signal, assertActive };
+    try {
+      if (acceptedDelivery(state) || state.status === "rejected") return finish();
+      assertActive();
+      if (state.status === "deferred" && state.dueAt > this.time()) return finish();
+      if (state.status === "uncertain") {
+        if (conflictingDeliveryReceipts(state.attempts)) return finish();
+        if (sink.reconcile) {
+          const pending = state.attempts.filter(attempt => attempt.outcome.status === "uncertain");
+          const outcome = await sink.reconcile(identity(task), context);
+          this.transaction(() => { for (const attempt of pending) this.deliveries.record(task, attempt.id, outcome); });
+          return finish();
+        }
+        if (sink.idempotency === "none") return finish();
+      }
+      this.transaction(() => { assertActive(); this.deliveries.start(task, task.token!); });
+      let outcome: DeliveryOutcome;
+      try { outcome = await sink.send(identity(task), context); }
+      catch (error) {
+        return { ...finish(), error };
+      }
+      this.transaction(() => this.deliveries.record(task, task.token!, outcome));
+      return finish();
+    } catch (error) {
+      if (error instanceof TaskError && error.code === "rollback_failed") throw error;
+      this.fenced(task);
+      if (error instanceof TaskStopped) {
+        state = this.deliveries.inspect(task);
+        if (state.status === "uncertain") return this.finish(task, "uncertain", error.outcome.reason);
+        return this.finish(task, error.outcome.status, error.outcome.reason, error.outcome.dueAt);
+      }
+      throw error;
+    }
+  }
+
+  private claim(key?: Key): StoredTask | undefined {
     if (!this.workflows.length) return undefined;
     return this.transaction(() => {
       const now = this.time();
       const supported = this.workflows.map(() => "(t.kind = ? AND t.version = ?)").join(" OR ");
       const candidate = this.database.prepare(`SELECT t.scope, t.id FROM small_hour_tasks t
-        WHERE (${supported}) AND ((t.status IN ('queued', 'deferred') AND t.due_at <= ?) OR (t.status = 'running' AND t.lease_until <= ?))
+        WHERE (${supported}) AND ${key ? "t.scope = ? AND t.id = ? AND t.status = 'uncertain'"
+          : "((t.status IN ('queued', 'deferred') AND t.due_at <= ?) OR (t.status = 'running' AND t.lease_until <= ?))"}
         AND NOT EXISTS (SELECT 1 FROM small_hour_tasks other WHERE other.concurrency_scope = t.concurrency_scope
           AND (other.scope != t.scope OR other.id != t.id) AND other.status IN ('running', 'uncertain'))
         ORDER BY t.due_at, t.scope, t.id LIMIT 1`)
-        .get(...this.workflows.flatMap(workflow => [workflow.kind, workflow.version]), now, now) as Key | undefined;
+        .get(...this.workflows.flatMap(workflow => [workflow.kind, workflow.version]), ...(key ? [key.scope, key.id] : [now, now])) as Key | undefined;
       if (!candidate) return undefined;
       const task = this.required(candidate);
       this.snapshot(task);
       const workflow = this.definition(task);
       if (canonicalJson(plan(workflow.steps)) !== canonicalJson(task.plan)) throw new TaskError("contract_conflict", "The stored task requires its original step manifest.");
       if (task.attempts >= task.maxAttempts) {
-        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = 'attempt_limit', token = NULL, lease_until = NULL WHERE scope = ? AND id = ?`)
-          .run(task.status === "running" ? "uncertain" : "failed", task.scope, task.id));
+        const delivery = task.plan[0].kind === "delivery" ? this.deliveries.inspect(task) : undefined;
+        const delivered = delivery && acceptedDelivery(delivery);
+        const uncertain = delivery ? delivery.status === "uncertain" : ["running", "uncertain"].includes(task.status);
+        const status = delivered ? (task.cancellationReason ? "cancelled" : "completed") : uncertain ? "uncertain" : "failed";
+        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, token = NULL, lease_until = NULL WHERE scope = ? AND id = ?`)
+          .run(status, delivered ? task.cancellationReason : "attempt_limit", task.scope, task.id));
       } else {
         const expires = now + this.leaseMs; integer(expires);
         this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = 'running', token = ?, lease_until = ?, attempts = attempts + 1, reason = NULL WHERE scope = ? AND id = ?`)
@@ -397,6 +509,15 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         reason: row.reason as string | null, cancellationReason: row.cancellation_reason as string | null,
         token: row.token as string | null, leaseUntil: row.lease_until as number | null, resolution, scheduleJson: row.schedule_json as string };
     } catch (cause) { throw new TaskError("invalid_task", "The saved task failed validation.", { cause }); }
+  }
+  private savepoint<T>(work: () => T): T {
+    this.database.exec("SAVEPOINT small_hour_task_enqueue");
+    try { const value = work(); this.database.exec("RELEASE SAVEPOINT small_hour_task_enqueue"); return value; }
+    catch (cause) {
+      try { this.database.exec("ROLLBACK TO SAVEPOINT small_hour_task_enqueue"); this.database.exec("RELEASE SAVEPOINT small_hour_task_enqueue"); }
+      catch (rollback) { throw new TaskError("rollback_failed", "Task staging rollback could not be confirmed.", { cause: new AggregateError([cause, rollback]) }); }
+      throw cause;
+    }
   }
   private transaction<T>(work: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
