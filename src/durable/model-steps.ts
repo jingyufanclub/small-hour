@@ -17,6 +17,7 @@ export interface ModelStepResult<Result> {
   replayed: boolean;
   result: Result;
 }
+export interface ModelStepGuard { assertActive(): void }
 export class ModelStepError extends Error {
   constructor(readonly code: "invalid_request" | "contract_conflict" | "step_unresolved" | "invalid_checkpoint" | "invalid_result" | "step_changed",
     message: string, options?: ErrorOptions & { state?: ModelStepState }) {
@@ -101,9 +102,19 @@ export class SqliteModelStepStore {
     return row === undefined ? undefined : this.state(checked, row);
   }
 
-  async run<T>(request: OperationRequest, runtime: SmallHourRuntime, input: StructuredTurnInput<T>): Promise<ModelStepResult<StructuredTurnResult<T>>>;
-  async run<T = unknown>(request: OperationRequest, runtime: SmallHourRuntime, input: TurnInput<T>): Promise<ModelStepResult<TurnResult<T>>>;
-  async run(request: OperationRequest, runtime: SmallHourRuntime, input: AnyInput): Promise<ModelStepResult<SavedTurn>> {
+  async run<T>(request: OperationRequest, runtime: SmallHourRuntime, input: StructuredTurnInput<T>, guard?: ModelStepGuard): Promise<ModelStepResult<StructuredTurnResult<T>>>;
+  async run<T = unknown>(request: OperationRequest, runtime: SmallHourRuntime, input: TurnInput<T>, guard?: ModelStepGuard): Promise<ModelStepResult<TurnResult<T>>>;
+  async run(request: OperationRequest, runtime: SmallHourRuntime, input: AnyInput, guard?: ModelStepGuard): Promise<ModelStepResult<SavedTurn>> {
+    if (guard && (typeof guard.assertActive !== "function" || types.isAsyncFunction(guard.assertActive))) {
+      throw new ModelStepError("invalid_request", "Model-step guards must be synchronous.");
+    }
+    const assertActive = () => {
+      const value: unknown = guard?.assertActive();
+      if (value && (typeof value === "object" || typeof value === "function") && "then" in value && typeof value.then === "function") {
+        if (types.isPromise(value)) void value.catch(() => {});
+        throw new ModelStepError("invalid_request", "Model-step guards must be synchronous.");
+      }
+    };
     if (input.signal) checkAbort(input.signal);
     if ([input.structuredOutput?.parse, input.choice?.parse].some(parse => types.isAsyncFunction(parse))) {
       throw new ModelStepError("invalid_request", "Model-step validators must be synchronous.");
@@ -127,14 +138,16 @@ export class SqliteModelStepStore {
         }
         return { state, replayed: true };
       }
+      assertActive();
       const attemptId = randomUUID();
       const report: TurnReport = { agentId: selected.agentId, turnId: selected.turnId ?? attemptId,
         hops: 0, toolCalls: [], modelCalls: [], usage: [] };
       readReport(report);
-      this.database.prepare(`INSERT INTO small_hour_model_steps
+      const inserted = this.database.prepare(`INSERT INTO small_hour_model_steps
         (scope, id, kind, version, input_json, turn_json, attempt_id, status, report_json, format_version)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'started', ?, 1)`)
         .run(checked.scope, checked.id, checked.kind, checked.version, checked.inputJson, contract, attemptId, canonicalJson(report));
+      if (Number(inserted.changes) !== 1) throw new ModelStepError("step_changed", "The started model step was not recorded.");
       return { state: { attemptId, status: "started", report } as ModelStepState, replayed: false };
     });
     const { state, replayed } = started;
@@ -144,8 +157,12 @@ export class SqliteModelStepStore {
       return { attemptId: state.attemptId, replayed: true, result: validateResult(resultJson(state.result), selected, "invalid_checkpoint") };
     }
     try {
+      assertActive();
       const invoke = { ...selected, turnId: state.report.turnId };
-      const observer = { checkpoint: (report: TurnReport) => { this.update(checked, state.attemptId, "started", report); } };
+      const observer = { checkpoint: (report: TurnReport) => {
+        this.update(checked, state.attemptId, "started", report);
+        assertActive();
+      } };
       const result = invoke.structuredOutput
         ? await runtime.turn(invoke as StructuredTurnInput<unknown>, observer)
         : await runtime.turn(invoke as TurnInput, observer);

@@ -272,6 +272,26 @@ test("cancellation before entry starts neither a checkpoint nor a provider attem
   assert.equal(steps.inspect(request), undefined);
 });
 
+test("an ignored started marker cannot release context loading or a provider call", async t => {
+  const { db, steps } = fixture(t);
+  db.exec("CREATE TRIGGER ignore_start BEFORE INSERT ON small_hour_model_steps BEGIN SELECT RAISE(IGNORE); END");
+  let loads = 0, calls = 0;
+  const model = runtime(choosingProvider(() => { calls++; }), { memory: { load: async () => { loads++; return []; } } });
+  await assert.rejects(steps.run(request, model, turn));
+  assert.equal(loads, 0); assert.equal(calls, 0);
+  assert.equal(steps.inspect(request), undefined);
+});
+
+test("an asynchronous authority guard cannot permit durable execution", async t => {
+  const { steps } = fixture(t);
+  let calls = 0;
+  for (const assertActive of [async () => {}, () => Promise.resolve()]) {
+    await assert.rejects(steps.run(request, runtime(choosingProvider(() => { calls++; })), turn, { assertActive }), { code: "invalid_request" });
+    assert.equal(steps.inspect(request), undefined);
+  }
+  assert.equal(calls, 0);
+});
+
 test("an asynchronous replay validator is rejected before execution", async t => {
   const { steps } = fixture(t);
   let calls = 0;
