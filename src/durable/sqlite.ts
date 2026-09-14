@@ -6,6 +6,8 @@ export { SqliteModelSpendStore, ModelSpendError, type ModelSpendQuote, type Mode
 export { SqliteTaskRunner, TaskError, type TaskWorkflow, type TaskStep, type TaskContext,
   type TaskState, type TaskRunResult, type TaskStepState, type TaskStatus, type TaskPermission, type TaskSchedule, type TaskResolution } from "./tasks.js";
 
+export { DeliveryError, type DeliverySink, type DeliveryContext, type DeliveryReceipt, type DeliveryOutcome, type DeliveryAttempt, type DeliveryState } from "./delivery.js";
+
 type SqliteValue = string | number | null;
 
 export interface SqliteDatabase {
