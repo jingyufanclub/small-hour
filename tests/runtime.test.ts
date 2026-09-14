@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
+import { callbackGate, deadlineClock } from "./deadline-clock.js";
 import {
   EmptyMemorySource,
   MaxLengthOutput,
@@ -404,7 +406,7 @@ test("rejects an empty completion after a read tool", async () => {
   );
 });
 
-test("enforces the wall-clock timeout even when an adapter ignores abort", async () => {
+test("the real wall-clock deadline aborts an unfinished turn", async () => {
   const provider: ModelProvider = {
     name: "stuck",
     complete: async () => await new Promise<ProviderResponse>(() => {}),
@@ -423,22 +425,55 @@ test("enforces the wall-clock timeout even when an adapter ignores abort", async
   );
 });
 
-test("aborts during retry backoff instead of waiting out the delay", async () => {
-  const provider = new ScriptedProvider([new Error("temporary")]);
+test("deadline stops a provider that ignores abort without retrying it", async (t) => {
+  const clock = deadlineClock(t); const callback = callbackGate();
+  let calls = 0;
+  const provider: ModelProvider = { name: "stuck", complete: async () => {
+    calls++; await callback.wait(); return text("late answer");
+  } };
+  const runtime = new SmallHourRuntime({
+    provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(),
+    timeoutMs: 10, retry: { attempts: 3, delayMs: () => 0, retryable: () => true },
+  });
+  const pending = assert.rejects(runtime.turn({ agentId: "a", input: "hello" }), (error: unknown) => {
+    assert.ok(error instanceof RuntimeError);
+    assert.equal(error.code, "turn_aborted");
+    assert.deepEqual(error.report?.modelCalls.map((call) => call.status), ["unknown"]);
+    return true;
+  });
+  await callback.entered;
+  clock.tick(10);
+  await pending;
+  await callback.release();
+  assert.equal(calls, 1);
+});
+
+test("aborts during retry backoff instead of waiting out the delay", async (t) => {
+  const clock = deadlineClock(t);
+  let entered = false;
+  const provider = new ScriptedProvider([new Error("temporary"), text("retried")]);
   const runtime = new SmallHourRuntime({
     provider,
     persona: new StaticPersonaSource("p"),
     memory: new EmptyMemorySource(),
     timeoutMs: 10,
-    retry: { attempts: 3, delayMs: () => 10_000 },
+    retry: { attempts: 3, delayMs: () => {
+      entered = true;
+      queueMicrotask(() => clock.tick(10));
+      return 10_000;
+    } },
   });
-  const started = performance.now();
 
-  await assert.rejects(
-    runtime.turn({ agentId: "a-backoff", input: "hello" }),
-    (error: unknown) => error instanceof RuntimeError && error.code === "turn_aborted",
-  );
-  assert.ok(performance.now() - started < 500);
+  await assert.rejects(runtime.turn({ agentId: "a-backoff", input: "hello" }), (error: unknown) => {
+    assert.ok(error instanceof RuntimeError);
+    assert.equal(error.code, "turn_aborted");
+    assert.deepEqual(error.report?.modelCalls.map((call) => call.status), ["unknown"]);
+    return true;
+  });
+  assert.equal(entered, true);
+  clock.tick(10_000);
+  await setImmediate();
+  assert.equal(provider.calls.length, 1);
 });
 
 test("retries Anthropic connection errors but not permanent client errors", () => {

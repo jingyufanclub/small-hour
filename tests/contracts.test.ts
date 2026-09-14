@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { callbackGate, deadlineClock } from "./deadline-clock.js";
 import {
   EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse, type RuntimeOptions,
@@ -44,7 +45,6 @@ async function failure(promise: Promise<unknown>, code: string): Promise<TurnRep
   }
   assert.fail(`expected ${code}`);
 }
-const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 test("each turn uses fresh host memory without inheriting prior tool exchanges", async () => {
   const original: ProviderMessage[] = [{ role: "user", content: "Available item: coat-1" }];
@@ -147,44 +147,64 @@ test("a failed context load cancels the other loader before returning", async ()
 });
 
 test("deadline covers output and usage callbacks without returning success", async (t) => {
-  for (const hook of ["output", "usage"] as const) await t.test(hook, async () => {
-    const { provider } = scripted([{ ...text(), usage }]);
+  for (const hook of ["output", "usage"] as const) await t.test(hook, async (t) => {
+    const clock = deadlineClock(t); const callback = callbackGate();
+    const { provider, calls } = scripted([{ ...text(), usage }]);
     const options: Partial<RuntimeOptions> = hook === "output"
-      ? { outputPolicy: { apply: async (output) => { await delay(40); return { output, accepted: true }; } } }
-      : { usage: { record: async () => { await delay(40); } } };
-    const report = await failure(runtime(provider, { ...options, timeoutMs: 5 })
+      ? { outputPolicy: { apply: async (output) => { await callback.wait(); return { output, accepted: true }; } } }
+      : { usage: { record: () => callback.wait() } };
+    const pending = failure(runtime(provider, { ...options, timeoutMs: 5 })
       .turn({ agentId: "a", input: "go" }), "turn_aborted");
+    await callback.entered;
+    clock.tick(5);
+    const report = await pending;
+    await callback.release();
     assert.deepEqual(report.usage, [usage]);
     assert.equal(report.modelCalls[0].status, "responded");
+    assert.equal(calls.length, 1);
   });
 });
 
-test("choice callback timeout preserves the decision and starts no following write", async () => {
+test("choice callback timeout preserves the decision and starts no following write", async (t) => {
+  const clock = deadlineClock(t); const callback = callbackGate();
   let writes = 0;
   const { provider, calls } = scripted([use("small_hour_choose", "write"), text()]);
   const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
-  const report = await failure(runtime(provider, { tools, timeoutMs: 5 }).turn({
+  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({
     agentId: "a", input: "go", choice: {
       description: "choose", inputSchema: {}, parse: () => ({ selectedId: "item-7" }),
-      onChoice: async () => { await delay(40); }, authorizeWrite: () => true,
+      onChoice: () => callback.wait(), authorizeWrite: () => true,
     },
   }), "turn_aborted");
+  await callback.entered;
+  clock.tick(5);
+  const report = await pending;
+  await callback.release();
   assert.deepEqual(report.choice, { selectedId: "item-7" });
   assert.equal(writes, 0);
   assert.equal(calls.length, 1);
   assert.equal(report.toolCalls[0].status, "unknown");
+  assert.equal(report.toolCalls[1].status, "not_started");
 });
 
-test("authorization timeout never starts the authorized operation", async () => {
+test("authorization timeout never starts the authorized operation", async (t) => {
+  const clock = deadlineClock(t); const callback = callbackGate();
   let writes = 0;
-  const { provider } = scripted([use("small_hour_choose", "write"), text()]);
+  const { provider, calls } = scripted([use("small_hour_choose", "write"), text()]);
   const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
-  const report = await failure(runtime(provider, { tools, timeoutMs: 5 }).turn({
+  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({
     agentId: "a", input: "go", choice: { description: "choose", inputSchema: {},
-      authorizeWrite: async () => { await delay(40); return true; } },
+      parse: () => ({ selectedId: "item-7" }),
+      authorizeWrite: async () => { await callback.wait(); return true; } },
   }), "turn_aborted");
-  await delay(45);
+  await callback.entered;
+  clock.tick(5);
+  const report = await pending;
+  await callback.release();
   assert.equal(writes, 0);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(report.choice, { selectedId: "item-7" });
+  assert.equal(report.toolCalls[0].status, "completed");
   assert.equal(report.toolCalls[1].status, "not_started");
 });
 
@@ -210,20 +230,24 @@ test("a later provider failure retains completed effects, receipts, choice, and 
   assert.equal(report.modelCalls[0].requestId, "request-1");
 });
 
-test("cancellation during a tool reports uncertainty and prevents subsequent tools", async () => {
+test("cancellation during a tool reports uncertainty and prevents subsequent tools", async (t) => {
+  const clock = deadlineClock(t); const callback = callbackGate();
   let laterWrites = 0;
   const { provider, calls } = scripted([use("slow", "later"), text()]);
   const tools = new ToolRegistry([
     { name: "slow", description: "slow", inputSchema: {}, execute: async (_, context) => {
-      context.recordReceipt("committed-before-wait"); await delay(40); context.recordReceipt("late-receipt"); return {};
+      context.recordReceipt("committed-before-wait"); await callback.wait(); context.recordReceipt("late-receipt"); return {};
     } },
     { name: "later", description: "later", inputSchema: {}, execute: () => ++laterWrites },
   ]);
-  const report = await failure(runtime(provider, { tools, timeoutMs: 5 }).turn({ agentId: "a", input: "go" }), "turn_aborted");
+  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({ agentId: "a", input: "go" }), "turn_aborted");
+  await callback.entered;
+  clock.tick(5);
+  const report = await pending;
   assert.equal(report.toolCalls[0].status, "unknown");
   assert.deepEqual(report.toolCalls[0].receiptIds, ["committed-before-wait"]);
   assert.equal(report.toolCalls[1].status, "not_started");
-  await delay(45);
+  await callback.release();
   assert.deepEqual(report.toolCalls[0].receiptIds, ["committed-before-wait"]);
   assert.equal(laterWrites, 0); assert.equal(calls.length, 1);
 });
@@ -277,23 +301,33 @@ test("duplicate provider call IDs are rejected before any effect in that batch",
   assert.equal(writes, 0);
 });
 
-test("a late choice callback cannot alter the accepted selection in the failure report", async () => {
-  const { provider } = scripted([use("small_hour_choose"), text()]);
-  const report = await failure(runtime(provider, { timeoutMs: 5 }).turn({ agentId: "a", input: "go", choice: {
+test("a late choice callback cannot alter the accepted selection in the failure report", async (t) => {
+  const clock = deadlineClock(t); const callback = callbackGate();
+  const { provider, calls } = scripted([use("small_hour_choose"), text()]);
+  const pending = failure(runtime(provider, { timeoutMs: 5 }).turn({ agentId: "a", input: "go", choice: {
     description: "choose", inputSchema: {}, parse: () => ({ selectedId: "original" }),
-    onChoice: async (choice) => { await delay(30); choice.selectedId = "changed"; },
+    onChoice: async (choice) => { await callback.wait(); choice.selectedId = "changed"; },
   } }), "turn_aborted");
-  await delay(40);
+  await callback.entered;
+  clock.tick(5);
+  const report = await pending;
+  await callback.release();
   assert.deepEqual(report.choice, { selectedId: "original" });
+  assert.equal(calls.length, 1);
 });
 
-test("synchronous callbacks that overrun the deadline cannot return success", async () => {
-  const { provider } = scripted([text()]);
-  await failure(runtime(provider, { timeoutMs: 5, outputPolicy: { apply: (output) => {
-    const end = performance.now() + 15;
-    while (performance.now() < end) {}
+test("synchronous callbacks that overrun the deadline cannot return success", async (t) => {
+  const clock = deadlineClock(t);
+  let entered = false;
+  const { provider, calls } = scripted([text()]);
+  const report = await failure(runtime(provider, { timeoutMs: 5, outputPolicy: { apply: (output) => {
+    entered = true;
+    clock.elapse(5);
     return { output, accepted: true };
   } } }).turn({ agentId: "a", input: "go" }), "turn_aborted");
+  assert.equal(entered, true);
+  assert.equal(calls.length, 1);
+  assert.equal(report.modelCalls[0].status, "responded");
 });
 
 test("structured mode validates a complete object with one call and no tools", async () => {
@@ -355,15 +389,23 @@ test("denied admission and failed accounting cannot trigger a provider retry", a
 });
 
 test("model admission and accounting obey the turn deadline", async (t) => {
-  for (const stage of ["admit", "record"] as const) await t.test(stage, async () => {
-    const { provider, calls } = scripted([text()]);
-    const report = await failure(runtime(provider, { timeoutMs: 5, modelCalls: stage === "admit"
-      ? { admit: async () => { await delay(40); return true; } }
-      : { record: async () => { await delay(40); } },
+  for (const stage of ["admit", "record"] as const) await t.test(stage, async (t) => {
+    const clock = deadlineClock(t); const callback = callbackGate();
+    const { provider, calls } = scripted([{ ...text(), usage }]);
+    const pending = failure(runtime(provider, { timeoutMs: 5,
+      retry: { attempts: 3, delayMs: () => 0, retryable: () => true },
+      modelCalls: stage === "admit"
+        ? { admit: async () => { await callback.wait(); return true; } }
+        : { record: () => callback.wait() },
     }).turn({ agentId: "a", input: "go" }), "turn_aborted");
-    await delay(45);
+    await callback.entered;
+    clock.tick(5);
+    const report = await pending;
+    await callback.release();
     assert.equal(calls.length, stage === "admit" ? 0 : 1);
+    assert.equal(report.modelCalls[0].status, stage === "admit" ? "not_started" : "responded");
     assert.equal(report.modelCalls[0].accounting, "unrecorded");
+    assert.deepEqual(report.usage, stage === "admit" ? [] : [usage]);
   });
 });
 
@@ -392,19 +434,26 @@ test("host compaction preserves selected IDs at the next provider boundary", asy
 });
 
 test("result encoding failures preserve the completed effect and prevent more calls", async (t) => {
-  for (const kind of ["circular", "compaction failure", "compaction timeout"] as const) await t.test(kind, async () => {
+  for (const kind of ["circular", "compaction failure", "compaction timeout"] as const) await t.test(kind, async (t) => {
+    const clock = deadlineClock(t); const callback = callbackGate();
     const { provider, calls } = scripted([use("write"), text()]);
     const circular: Record<string, unknown> = {}; circular.self = circular;
     const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: (_, context) => {
       context.recordReceipt("saved-7"); return kind === "circular" ? circular : { payload: "x".repeat(500) };
     } }]);
-    const report = await failure(runtime(provider, { tools, timeoutMs: 10, maxToolResultCharacters: 120,
+    const pending = failure(runtime(provider, { tools, timeoutMs: 10, maxToolResultCharacters: 120,
       toolResultOverflow: async () => {
-        if (kind === "compaction timeout") await delay(40);
+        if (kind === "compaction timeout") await callback.wait();
         throw new Error("could not compact");
       },
     }).turn({ agentId: "a", input: "go" }), kind === "circular" ? "tool_result_serialization_failed"
       : kind === "compaction timeout" ? "turn_aborted" : "turn_failed");
+    if (kind === "compaction timeout") {
+      await callback.entered;
+      clock.tick(10);
+    }
+    const report = await pending;
+    await callback.release();
     assert.equal(calls.length, 1); assert.equal(report.toolCalls[0].status, "completed");
     assert.deepEqual(report.toolCalls[0].receiptIds, ["saved-7"]);
   });
