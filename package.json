@@ -2,7 +2,7 @@
   "name": "small-hour",
   "version": "0.1.0",
   "private": true,
-  "description": "A bounded TypeScript runtime for agent turns.",
+  "description": "A TypeScript LLM runtime with tool execution, saved progress, spending controls, and recovery from failures.",
   "type": "module",
   "exports": {
     ".": {
@@ -35,7 +35,6 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "example": "tsx examples/small-companion/index.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "engines": {

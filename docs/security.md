@@ -1,27 +1,34 @@
-# Security model
+# Security and storage
 
-Small Hour assumes model input and model output are untrusted.
+Model input and output are untrusted. Applications authenticate callers, select identity partitions, and authorize context, effects, inspection, cancellation, reconciliation, and disclosure. `agentId` and storage scopes are identifiers, not authentication mechanisms.
 
-- Tools are an allowlist, never capability discovery. Schemas are strict by default and host parsers remain authoritative.
-- Every tool is marked read or write; an omitted mode is treated as write.
-- Choice-governed writes require an accepted choice and explicit host authorization for that exact call.
-- The host authenticates the caller and selects `agentId`; the model never selects its own identity partition.
-- A tool receives the host's `agentId`, `turnId`, `toolCallId`, and abort signal. It should scope every read and write to that context.
-- Mutating tools must be idempotent. Provider retries repeat model calls; malformed models can also request the same action twice.
-- Duplicate call IDs are rejected. A write that throws after starting ends the turn, preserving uncertainty and known receipts for host recovery.
-- Keep credentials outside personas, memory, and tool results. Provider adapters receive credentials through normal process configuration.
-- Bound memory, model hops, total model attempts, tokens, tool-result size, and wall-clock time. Every asynchronous host hook and retry wait obeys the same deadline.
-- Never execute a tool on the final provider hop; reserve one hop for interpreting its result.
-- Validate and moderate returned text in the host before delivering it to another person or system.
-- Structured output requires a host parser; a provider schema alone cannot authorize an action or prove a selected ID is valid.
-- Oversized tool results fail unless the host supplies a bounded replacement. Compaction must preserve necessary evidence.
-- Turn reports and `recordReceipt()` references describe known progress; they do not roll back effects. Reconcile uncertain tools, model calls, and unrecorded accounting before retrying.
-- The optional SQLite operation store makes participating local writes and their receipt atomic. It does not authenticate scopes, authorize receipt disclosure, or cover remote effects. Application authorization remains required before committing work or returning saved results.
-- The optional model-step store persists explicit contracts, input text, tool arguments, progress and results. Restrict access and retention as application data. Replaying a completed result grants no new permission; incomplete steps require reconciliation before new execution. The store does not automatically retain model context or provider-native history.
-- The optional spending store commits reservations before provider dispatch and retains unresolved charges. Applications authenticate scope selection, supply conservative estimates and current prices/limits, and verify reconciliation evidence. Pricing snapshots and evidence are application data; no input text or provider history is copied automatically. Bypassing its hooks, deleting accounting rows, or resetting scopes bypasses the persisted budget.
-- The optional task runner accepts application-defined workflows and explicit submissions only. Authenticate submission, inspection, cancellation and reconciliation endpoints. Claims fence runner-owned local commits and task transitions; asynchronous tools and external systems require their own effect-boundary checks. Cancellation and lease expiry cannot undo external work. Uncertain tasks retain their concurrency scope until supported recovery establishes an outcome or application verification supplies a terminal resolution. Saved tasks and step results remain private application data.
-- Delivery sinks receive the exact saved product after current authorization. Authenticate sink configuration and receipt-recording endpoints; neither a saved output nor a receipt grants permission for new disclosure. Sinks must disable SDK retries, preserve the destination and payload, and substantiate non-acceptance, acceptance and confirmation. The runner cannot verify external evidence or create remote idempotency guarantees.
-- OpenAI and compatible HTTP adapters make one request per attempt, reject redirects, and never switch to a fallback provider. A compatible endpoint receives only its explicitly supplied API key.
-- Choose a trusted provider endpoint and declare its actual tool/schema capabilities. Native provider history is opaque context for that same adapter and must not be modified or mixed across providers.
+## Execution boundaries
 
-The runtime deliberately has no shell, filesystem, browser, network proxy, automatically running scheduler, channel adapter, or secret store. Applications may expose narrow versions of those capabilities as tools, but the risk and authorization remain theirs.
+- Register narrow tools and validate domain inputs. Per-turn allowlists constrain execution; schemas alone cannot authorize effects.
+- Declare read/write modes. Choice-governed writes require an accepted choice and explicit authorization for each call. Stable operation IDs must cover repeated requests arriving under different provider IDs.
+- Validate and moderate final output for its destination. A saved result or receipt does not grant permission for new disclosure.
+- Configure context bounds, model-call limits, deadlines, token allowances, and tool-result handling. Preserve required facts when selecting context or replacing oversized results.
+- Keep SDK retries disabled. Unknown effects require evidence-based recovery. Cancellation, lease expiry, and timeouts cannot undo work already started.
+- Choose trusted endpoints and verified model capabilities. HTTP adapters reject redirects; compatible endpoints receive only explicit credentials. Opaque provider history stays unchanged within its original provider's turn.
+
+The package exposes no unrestricted shell, filesystem, browser, proxy, channel, or credential capabilities. Application tools and sinks remain responsible for the capabilities they implement.
+
+## Storage and access
+
+Durable components are opt-in and use a supplied synchronous SQLite connection through `exec`, `prepare`, `get`, and `run`. Constructors open no connection or worker. `initialize()` creates versioned tables; it does not migrate application rows or import historical effects/spending.
+
+Applications own connection lifetime, durability settings, busy timeout, backup, access control, and retention. Authenticate all administrative APIs. Storage/busy errors propagate without another retry loop. Restore or replace a connection after an unconfirmed rollback before attempting recovery.
+
+| Component | Saved data |
+| --- | --- |
+| Local operations | Explicit contract and validated result. |
+| Model steps | Explicit contract, turn configuration, reports, and completed result. |
+| Spending | Identity, token limits, pricing quote, normalized outcome/usage, and reconciliation evidence. |
+| Tasks | Input, manifest, schedule, claims, lifecycle, and resolution. |
+| Delivery | Attempt IDs and receipt/outcome evidence; payload remains in the task. |
+
+Contracts, input text, tool arguments, generated results, destinations, pricing JSON, and evidence may contain private data. Keep credentials outside instructions, memory, contracts, and tool results. Retrieved memory packets and provider-native history are not automatically copied into durable storage.
+
+Retain participating rows for the duplicate/recovery window. Deleting receipts removes replay protection; deleting spending or changing scopes removes budget history. Keep compatible workflow handlers during upgrades or stop execution during rollback. Adoption must replace the previous effect, retry, accounting, or transport authority for the selected path.
+
+Claims fence runner-owned local commits and task transitions. Remote systems require actual idempotency and effect-boundary authorization. Applications verify reconciliation evidence and establish that old work cannot later contradict it. Receipt shape validation cannot establish authenticity or universal exactly-once behavior.

@@ -1,49 +1,35 @@
-# Durable model steps
+# Model steps
 
-`SqliteModelStepStore` from `small-hour/durable/sqlite` wraps an existing `SmallHourRuntime`. It records one bounded execution per scoped step identity. `initialize()` explicitly creates `small_hour_model_steps` on an existing synchronous SQLite connection. The constructor opens no connection or background service.
+`SqliteModelStepStore` wraps a `SmallHourRuntime` and preserves completed results and available progress. Import it from `small-hour/durable/sqlite`, supply a synchronous connection, and call `initialize()` to create `small_hour_model_steps`.
 
-## Execution contract
+## Execution
 
-`run(request, runtime, input)` accepts the same `OperationRequest` identity fields as local operations and the runtime's structured or tool-turn input. It returns `{ attemptId, replayed, result }`; `result` retains the runtime's structured, reply, silence, or rejected outcome. Completion is distinct from output acceptance. A completed rejection is replayed as a rejection.
+`run(request, runtime, input)` returns `{ attemptId, replayed, result }`. The result retains structured, reply, silence, or rejected status. A completed rejection remains a rejection on replay.
 
-The store binds `(scope, id)` to `kind`, workflow `version`, JSON `input`, and the supplied turn configuration. Configuration includes agent identity, input text, explicit turn ID, schemas, token settings, choice settings, and tool allowlists. Signals, callback implementations, and unrelated properties on the caller object are excluded. A changed contract fails before any model or tool call.
+The scoped `OperationRequest` binds kind, version, JSON input, and turn configuration: agent/input identity, explicit turn ID, schemas, token/choice settings, and allowed tools. Changed contracts fail before model or tool execution. Signals and callback implementations are excluded. Include revisions or immutable references for instructions, context, provider settings, validators, and effect policy; closure contents cannot be fingerprinted. Inputs are copied. Without an explicit turn ID, the attempt ID becomes its turn ID.
 
-Applications must include revisions or immutable references for relevant context, instructions, provider configuration, validation rules, and tool policy in the request contract. The store cannot fingerprint closure contents or discover changed domain facts. The request and configuration are copied before execution. If no turn ID is supplied, the saved attempt ID becomes its turn ID.
+A `started` record commits before context loading or provider execution. Awaited checkpoints preserve model-call IDs, usage/accounting state, accepted choices, tool outcomes, and receipt references. The runtime retains provider retry and deadline ownership. Failed checkpoints stop further execution.
 
-Before loading context or calling the provider, the store commits a `started` record. Runtime progress checkpoints preserve model-call IDs, available usage, accounting status, accepted partial choices, tool status, and recorded local receipt references. The existing runtime remains the sole owner of provider retries, allowlists, tool dispatch, and deadlines. A failed checkpoint stops execution; it cannot become a recoverable tool error followed by more model calls.
-
-After the runtime finishes, the store validates and saves the complete result before returning it. A matching completed step reuses that result without loading memory, calling the model, executing tools, applying text policy again, or repeating accounting hooks. Structured-result and choice parsers revalidate saved values and must be pure, synchronous, JSON-preserving validators. They may reject incompatible results but cannot substitute selected IDs or normalize saved decisions into different values. Version or migrate incompatible contracts explicitly.
+Completion validates and saves the full result before returning. Exact replay skips context loading, models, tools, text policy, and accounting. Structured-result and choice parsers revalidate saved values; they must be pure, synchronous, and JSON-preserving.
 
 ## Inspection and recovery
 
-`inspect(request)` returns `undefined` for an absent step, otherwise one of:
+`inspect(request)` validates identity/storage and returns `undefined` or:
 
-| State | Surviving evidence |
+| State | Available evidence |
 | --- | --- |
-| `started` | Attempt ID and the most recent committed progress report. Execution may still be running or may have been interrupted. |
-| `failed` | Attempt ID, available partial report, and error code. Prior effects and provider costs may still be uncertain. |
-| `completed` | Attempt ID, report, and the exact saved result, including its acceptance status. |
+| `started` | Attempt ID and latest committed progress; execution may still be active. |
+| `failed` | Attempt ID, partial report, and error code; effects or costs may remain uncertain. |
+| `completed` | Exact result and report, including acceptance status. |
 
-Inspection validates storage structure and identity. Values in its reports and results still require application domain validation before use. `run()` additionally applies the supplied result/choice validators when replaying completed steps. Malformed or incompatible stored state fails with `invalid_checkpoint`; it never authorizes regeneration.
+Application domain validation still applies. Malformed checkpoints fail with `invalid_checkpoint`; they never authorize regeneration. Re-entry into started or failed work throws `step_unresolved` with inspected state. There is no reset, takeover, or automatic replay of incomplete steps.
 
-Re-entering a started or failed step throws `ModelStepError` with code `step_unresolved` and its inspected `state`. The store supplies no automatic reset, takeover, polling, or retry of that step. The application owns reconciliation: establish whether old work is still running, inspect authoritative operation receipts and provider accounting, and preserve any accepted partial choice. Continuing from those facts is an application-defined next step. Any authorized new execution needs an explicit identity and spending decision; changing an ID alone does not make repeating effects safe. Completed steps remain immutable.
+Reconciliation must establish whether old work can continue, preserve accepted decisions, and inspect authoritative effects and spending. Any next execution needs an explicit identity and authorization; changing an ID alone does not make repetition safe. A response received before a failed completion commit remains incomplete. Known charges do not complete a model step, and a saved result does not prove complete accounting. Use stable scopes with [model spending](model-spending.md).
 
-A process can die after a provider response arrives but before the result checkpoint commits. That remains an incomplete step, even if the report says `responded`. A progress report proves only the most recent saved boundary; it cannot recover unrecorded asynchronous completions. No universal exactly-once provider guarantee or unattended paid recovery is supplied.
+## Transactions and guards
 
-The optional [model-spending store](model-spending.md) keeps reservation and accounting state under the report's call IDs. Reuse the same budget scope for retries and authorized continuation steps. Completed-step replay makes no new reservation or charge; knowing a call's charge does not by itself resolve its unfinished model step.
+Start, progress, completion, and failure use independent short transactions. An outer transaction prevents execution; no database transaction spans a model/tool await. Concurrent starts serialize; only the new record's creator executes. Busy/storage errors propagate. After cancellation, failure handling may make one synchronous attempt to preserve its report without starting effects.
 
-## Transactions and storage
+The optional fourth argument `{ assertActive() }` supplies a synchronous guard. It checks entry and progress boundaries, saving available facts before rejecting continuation. Completed replay skips the guard; consuming boundaries still authorize disclosure and effects. [Tasks](tasks.md) use it for claims and cancellation.
 
-Each start, changed progress snapshot, completion, or failure uses a short SQLite transaction. No transaction stays open across a model call or tool await. An existing outer transaction prevents the store from starting work: a provisional marker cannot guard an external call. The connection must also be outside an outer transaction when progress and completion are saved. Local-operation callbacks may use their own short transactions within a tool.
-
-Concurrent starts serialize through SQLite. Only the caller that creates the started row may execute; subsequent callers inspect or replay it. Storage/busy errors propagate without another retry loop. Connection lifetime, durability settings, retention, and busy timeout remain application-owned.
-
-The table stores the explicit request contract, turn configuration, reports, and final result. These may include private input text, tool arguments, selections, and generated output. It stores no growing conversation, retrieved memory packet, provider-native transcript, or automatic model-authored plan. It does not read credentials; applications must keep secrets out of explicit contracts and report-bearing tool inputs. Applications control access and retention and must authorize disclosure or effects again at their consuming boundaries. Deleting a row removes duplicate protection.
-
-The row format is versioned separately from workflow contracts. Initialization performs no backfill or migration of existing application rows. Keeping the table when rolling back the library preserves its evidence; older runtimes cannot enforce model-step replay automatically. Adoption must keep one execution owner for each workflow.
-
-## Runtime observer
-
-`runtime.turn(input, { checkpoint(report) })` exposes the awaited report boundary used by the store. Reports are detached snapshots. Observers should persist progress without starting effects or provider retries; their work participates in the turn deadline. An observer exception produces `checkpoint_failed`, with the available report. A failed durable-step call may make a final synchronous attempt to save its failure report after cancellation; it starts no model call or application tool.
-
-`SqliteModelStepStore.run(request, runtime, input, { assertActive() })` accepts an optional execution guard. It must be synchronous and throw when work is no longer authorized. The store checks it before starting and at runtime progress boundaries, saving available progress before a boundary rejection. Completed replay does not invoke the guard. Result validation, disclosure authorization and actual effect-boundary fencing remain application responsibilities. The task runner uses this guard for claims, cancellation and current permission; no second model retry loop is added.
+The table stores explicit contracts, configuration, reports, and results. It does not automatically retain retrieved memory or provider-native history. Keep secrets out of contracts and tool arguments. Retain evidence and compatible handlers during rollback; initialization makes no backfill. See [storage and access](security.md) and the [runtime observer](execution.md).

@@ -17,3 +17,5 @@ Keep ownership explicit:
 Run `npm run check` before calling a change complete.
 
 Define workflow outcomes and forbidden effects before implementation, then write tests at the real persistence, execution, or delivery boundary. Mocked model output proves mechanics only. Review architecture, ownership, failure/restart behavior, simplicity, and crustiness; keep comments only for non-obvious constraints. Work one selected ticket at a time and leave dependent slices parked until it is finished and reviewed.
+
+Public documentation stays neutral and concise. Describe current capabilities, setup, contracts and consumer obligations; keep pages suitable for a five-minute scan. Exclude character framing, consumer-specific examples, comparison pitches and revision history.
