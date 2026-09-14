@@ -124,6 +124,10 @@ not update with late completions and cannot replace durable host receipts.
 
 The optional [model-step store](model-steps.md) records execution before entering this loop and persists completed results and available progress. Completed replay bypasses the loop; incomplete execution stops for application reconciliation. Keep application-defined choices and consequential local operations in explicit steps when they need separate recovery boundaries. The core runtime retains no cross-turn state when the store is unused.
 
+## Durable tasks
+
+The optional [task runner](tasks.md) composes local operations and model steps into fixed, versioned workflows. Applications submit tasks with due times, attempt limits and concurrency scopes, then explicitly call `runNext()`. Receipt replay supplies completed results to later steps without executing earlier effects again. The runner owns claims and safe local retries; the core retains provider retry ownership. Unfinished model work stops for reconciliation. Applications own task creation, authorization, wakeups and delivery.
+
 ## Adopting these contracts
 
 Older embeddings that relied on automatic previews must supply `toolResultOverflow` or return smaller results.
