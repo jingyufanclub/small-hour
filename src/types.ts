@@ -61,9 +61,18 @@ export interface ProviderRequest {
   signal: AbortSignal;
 }
 
+export type ProviderStopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "refusal"
+  | "content_filter" | "context_limit" | "pause" | "unknown";
+
+export interface ProviderStop {
+  reason: ProviderStopReason;
+  nativeReason?: string;
+}
+
 export interface ProviderResponse {
   content: AssistantBlock[];
-  stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "refusal" | "content_filter" | "unknown";
+  stopReason: ProviderStopReason;
+  nativeStopReason?: string;
   usage?: TokenUsage;
   requestId?: string;
 }
@@ -105,16 +114,20 @@ export interface ModelCallContext extends TurnContext {
   thinking?: { enabled: true; budgetTokens: number };
 }
 
-export interface ModelCallRecord {
+interface ModelCallIdentity {
   callId: string;
   provider: string;
   attempt: number;
   hop: number;
-  status: "not_started" | "responded" | "rejected" | "unknown";
   requestId?: string;
   usage?: TokenUsage;
   accounting: "unrecorded" | "recorded";
 }
+
+export type ModelCallRecord = ModelCallIdentity & (
+  | { status: "responded"; stop?: ProviderStop }
+  | { status: "not_started" | "rejected" | "unknown"; stop?: never }
+);
 
 export interface ModelCallHooks {
   admit?(context: ModelCallContext): boolean | Promise<boolean>;

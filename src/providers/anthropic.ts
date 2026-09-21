@@ -52,8 +52,10 @@ function genericContent(content: Anthropic.ContentBlock[]): AssistantBlock[] {
   });
 }
 
-function stopReason(reason: Anthropic.Message["stop_reason"]): ProviderResponse["stopReason"] {
-  if (reason === "end_turn" || reason === "tool_use" || reason === "max_tokens" || reason === "stop_sequence") return reason;
+function stopReason(reason: unknown): ProviderResponse["stopReason"] {
+  if (reason === "end_turn" || reason === "tool_use" || reason === "max_tokens" || reason === "stop_sequence" || reason === "refusal") return reason;
+  if (reason === "model_context_window_exceeded") return "context_limit";
+  if (reason === "pause_turn") return "pause";
   return "unknown";
 }
 
@@ -103,6 +105,7 @@ export class AnthropicProvider implements ModelProvider {
     return {
       content: genericContent(message.content),
       stopReason: stopReason(message.stop_reason),
+      ...(typeof message.stop_reason === "string" && message.stop_reason.trim() ? { nativeStopReason: message.stop_reason } : {}),
       requestId: message._request_id ?? undefined,
       usage: tokenUsage(message),
     };

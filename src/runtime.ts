@@ -54,7 +54,7 @@ function snapshot<TChoice>(report: TurnReport<TChoice>): TurnReport<TChoice> {
     ...report,
     ...(report.choice === undefined ? {} : { choice: structuredClone(report.choice) }),
     toolCalls: report.toolCalls.map((call) => ({ ...call, receiptIds: [...call.receiptIds] })),
-    modelCalls: report.modelCalls.map((call) => ({ ...call, usage: call.usage && { ...call.usage } })),
+    modelCalls: report.modelCalls.map((call) => structuredClone(call)),
     usage: report.usage.map((usage) => ({ ...usage })),
   };
 }

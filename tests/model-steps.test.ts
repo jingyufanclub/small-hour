@@ -400,7 +400,10 @@ for (const stage of ["before-provider", "in-provider", "after-provider", "after-
     } else {
       assert.equal(state?.status, "started");
       await assert.rejects(app.steps.run(identity, model, input), { code: "step_unresolved" });
-      if (stage === "after-provider") assert.equal(state?.report.modelCalls[0].status, "responded");
+      if (stage === "after-provider") {
+        assert.equal(state?.report.modelCalls[0].status, "responded");
+        assert.deepEqual(state?.report.modelCalls[0].stop, { reason: "end_turn" });
+      }
     }
     assert.equal(calls, 0);
     assert.equal(app.db.prepare("SELECT count(*) n FROM provider_calls").get()?.n, stage === "before-provider" ? 0 : 1);

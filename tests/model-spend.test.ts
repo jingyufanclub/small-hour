@@ -272,7 +272,7 @@ test("a late provider completion cannot silently release an aborted call's reser
 });
 
 test("the persisted price quote owns settlement and duplicate accounting cannot charge twice", async t => {
-  const { spend, db } = fixture(t);
+  const app = fixture(t), { spend, db } = app;
   const pricing = { perToken: 1 }, p = policy(); let priced = 0;
   p.quote = () => ({ scope, limit: 10, amount: 10, pricing });
   p.charge = (tokens, saved) => { priced++; return tokens.outputTokens * (saved as typeof pricing).perToken; };
@@ -281,11 +281,73 @@ test("the persisted price quote owns settlement and duplicate accounting cannot 
     maxTokens: 10, signal: new AbortController().signal };
   assert.equal(await hooks.admit!(context), true); pricing.perToken = 90;
   assert.throws(() => hooks.admit!(context), { code: "call_exists" });
-  const record: ModelCallRecord = { callId: context.callId, provider: "fixture", attempt: 1, hop: 1, status: "responded", usage, accounting: "unrecorded" };
-  await hooks.record!(record, context); await hooks.record!(record, context);
-  assert.equal(priced, 1); assert.equal(spend.inspectBudget(scope).acceptedAmount, 1);
-  assert.throws(() => hooks.record!({ ...record, usage: { ...usage, outputTokens: 0 } }, context), { code: "settlement_conflict" });
+  const record: ModelCallRecord = { callId: context.callId, provider: "fixture", attempt: 1, hop: 1, status: "responded", usage,
+    stop: { reason: "context_limit", nativeReason: "model_context_window_exceeded" }, accounting: "unrecorded" };
+  await hooks.record!(record, context);
   assert.doesNotMatch(String(db.prepare("SELECT context_json FROM small_hour_model_spend").get()?.context_json), /Process the selected work/);
+  app.close();
+  const recovered = app.open(), recoveredHooks = recovered.spend.hooks(p);
+  assert.deepEqual(recovered.spend.inspect(context.callId)?.record?.stop, record.stop);
+  await recoveredHooks.record!(record, context);
+  assert.equal(priced, 1); assert.equal(recovered.spend.inspectBudget(scope).acceptedAmount, 1);
+  for (const changed of [
+    { ...record, usage: { ...usage, outputTokens: 0 } },
+    { ...record, stop: { reason: "end_turn" as const, nativeReason: "model_context_window_exceeded" } },
+    { ...record, stop: { reason: "context_limit" as const, nativeReason: "different_native_reason" } },
+  ]) assert.throws(() => recoveredHooks.record!(changed, context), { code: "settlement_conflict" });
+  assert.equal(priced, 1); assert.equal(recovered.spend.inspectBudget(scope).acceptedAmount, 1);
+  assert.deepEqual(recovered.spend.inspect(context.callId)?.record?.stop, record.stop);
+});
+
+test("older spending records without stop evidence survive reopen without a new charge or invented reason", async t => {
+  const app = fixture(t); let calls = 0;
+  const result = await runtime(app.spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input);
+  const callId = result.modelCalls[0].callId;
+  const saved = JSON.parse(String(app.db.prepare("SELECT record_json FROM small_hour_model_spend WHERE call_id = ?").get(callId)?.record_json));
+  assert.deepEqual(saved.stop, { reason: "end_turn" });
+  delete saved.stop;
+  const legacy = JSON.stringify(saved);
+  app.db.prepare("UPDATE small_hour_model_spend SET record_json = ? WHERE call_id = ?").run(legacy, callId);
+  app.close();
+  const recovered = app.open();
+  assert.equal(recovered.spend.inspect(callId)?.record?.stop, undefined);
+  assert.equal(recovered.spend.inspect(callId)?.status, "accepted");
+  assert.equal(recovered.spend.inspectBudget(scope).acceptedAmount, 3);
+  assert.equal(recovered.db.prepare("SELECT record_json FROM small_hour_model_spend WHERE call_id = ?").get(callId)?.record_json, legacy);
+  assert.equal(calls, 1);
+});
+
+test("invalid stop evidence cannot settle or disguise a corrupt spending record", async t => {
+  const app = fixture(t); let priced = 0;
+  const p = policy(); p.charge = () => { priced++; return 3; };
+  const hooks = app.spend.hooks(p);
+  const context: ModelCallContext = { ...input, callId: "call-fixed", turnId: "turn-a", provider: "fixture", attempt: 1, hop: 1,
+    maxTokens: 10, signal: new AbortController().signal };
+  const record: ModelCallRecord = { callId: context.callId, provider: "fixture", attempt: 1, hop: 1, status: "responded", usage,
+    stop: { reason: "end_turn" }, accounting: "unrecorded" };
+  const invalid = [
+    { stop: { reason: "invented" } },
+    { stop: { reason: "end_turn", nativeReason: 7 } },
+    { stop: { reason: "end_turn", nativeReason: " " } },
+    { stop: { reason: "end_turn", output: "private response" } },
+    { status: "unknown", usage: undefined, stop: { reason: "end_turn" } },
+  ];
+  assert.equal(await hooks.admit!(context), true);
+  for (const update of invalid) {
+    assert.throws(() => hooks.record!({ ...record, ...update } as ModelCallRecord, context), TypeError);
+    assert.equal(app.spend.inspect(context.callId)?.status, "reserved");
+    assert.equal(app.spend.inspect(context.callId)?.record, null);
+    assert.equal(app.spend.inspectBudget(scope).reservedAmount, 10);
+  }
+  assert.equal(priced, 0);
+  await hooks.record!(record, context);
+  for (const update of invalid) {
+    app.db.prepare("UPDATE small_hour_model_spend SET record_json = ? WHERE call_id = ?")
+      .run(JSON.stringify({ ...record, ...update }), context.callId);
+    assert.throws(() => app.spend.inspect(context.callId), { code: "invalid_record" });
+    assert.throws(() => hooks.record!(record, context), { code: "invalid_record" });
+  }
+  assert.equal(priced, 1);
 });
 
 test("invalid quotes stop dispatch and invalid prices or usage preserve the reservation", async t => {
