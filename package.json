@@ -1,6 +1,6 @@
 {
   "name": "small-hour",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A TypeScript LLM runtime with tool execution, saved progress, spending controls, and recovery from failures.",
   "type": "module",
@@ -33,9 +33,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run build",
+    "check:package": "node scripts/check-package.mjs"
   },
   "engines": {
     "node": ">=20.3"
