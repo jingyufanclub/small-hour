@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { TurnDeadline } from "./deadline.js";
+import { readModelCallStop } from "./model-call-record.js";
 import { withRetry, type RetryPolicy } from "./retry.js";
 import { RuntimeError, type ModelCallContext, type ModelCallHooks, type ModelCallRecord,
   type ModelProvider, type ProviderRequest, type ProviderResponse, type TurnContext, type TurnReport } from "./types.js";
@@ -24,10 +25,11 @@ export async function completeModelCall(
         attempt: report.modelCalls.length + 1, hop: report.hops,
         maxTokens: request.maxTokens, thinking: request.thinking,
       };
-      const call: ModelCallRecord = {
+      let call: ModelCallRecord = {
         callId: callContext.callId, provider: provider.name, attempt: callContext.attempt, hop: report.hops,
         status: "not_started", accounting: "unrecorded",
       };
+      const callIndex = report.modelCalls.length;
       report.modelCalls.push(call);
       await options.checkpoint?.();
       if (options.hooks?.admit) {
@@ -43,7 +45,7 @@ export async function completeModelCall(
       const record = async () => {
         if (!options.hooks?.record) return;
         try {
-          await deadline.run(() => options.hooks!.record!({ ...call, usage: call.usage && { ...call.usage } }, callContext));
+          await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext));
           call.accounting = "recorded";
         } catch (error) {
           deadline.check();
@@ -72,15 +74,22 @@ export async function completeModelCall(
         if (options.hooks?.record) await options.checkpoint?.();
         throw new ProviderFailure("provider failed", { cause: error });
       }
-      call.status = "responded";
+      call = { ...call, status: "responded" };
+      report.modelCalls[callIndex] = call;
       call.requestId = response.requestId;
       if (response.usage) {
         call.usage = { ...response.usage };
         report.usage.push({ ...response.usage });
       }
+      let invalidStop: unknown;
+      try {
+        call.stop = readModelCallStop({ status: "responded", stop: { reason: response.stopReason,
+          ...(response.nativeStopReason === undefined ? {} : { nativeReason: response.nativeStopReason }) } });
+      } catch (cause) { invalidStop = cause; }
       await options.checkpoint?.();
       await record();
       if (options.hooks?.record) await options.checkpoint?.();
+      if (invalidStop) throw new RuntimeError("provider returned invalid stop evidence", "invalid_provider_stop", { cause: invalidStop });
       return response;
     }, {
       ...options.retry,

@@ -8,7 +8,7 @@
 
 The scoped `OperationRequest` binds kind, version, JSON input, and turn configuration: agent/input identity, explicit turn ID, schemas, token/choice settings, and allowed tools. Changed contracts fail before model or tool execution. Signals and callback implementations are excluded. Include revisions or immutable references for instructions, context, provider settings, validators, and effect policy; closure contents cannot be fingerprinted. Inputs are copied. Without an explicit turn ID, the attempt ID becomes its turn ID.
 
-A `started` record commits before context loading or provider execution. Awaited checkpoints preserve model-call IDs, usage/accounting state, accepted choices, tool outcomes, and receipt references. The runtime retains provider retry and deadline ownership. Failed checkpoints stop further execution.
+A `started` record commits before context loading or provider execution. Awaited checkpoints preserve model-call IDs, [provider stop evidence](execution.md), usage/accounting state, accepted choices, tool outcomes, and receipt references. The runtime retains provider retry and deadline ownership. Failed checkpoints stop further execution.
 
 Completion validates and saves the full result before returning. Exact replay skips context loading, models, tools, text policy, and accounting. Structured-result and choice parsers revalidate saved values; they must be pure, synchronous, and JSON-preserving.
 
@@ -33,3 +33,5 @@ Start, progress, completion, and failure use independent short transactions. An 
 The optional fourth argument `{ assertActive() }` supplies a synchronous guard. It checks entry and progress boundaries, saving available facts before rejecting continuation. Completed replay skips the guard; consuming boundaries still authorize disclosure and effects. [Tasks](tasks.md) use it for claims and cancellation.
 
 The table stores explicit contracts, configuration, reports, and results. It does not automatically retain retrieved memory or provider-native history. Keep secrets out of contracts and tool arguments. Retain evidence and compatible handlers during rollback; initialization makes no backfill. See [storage and access](security.md) and the [runtime observer](execution.md).
+
+Stop evidence is optional in format version 1. Rows written without it remain readable and are not backfilled. Readers validate supplied evidence and reject a final stop that contradicts the saved result. Older model-step readers tolerate the additional field; older spending readers omit it when presenting records. Rolling back therefore loses diagnostic visibility, and rewriting those records through older code can discard evidence. Retain a database backup and use the updated reader when investigating incomplete work. Consumers with exhaustive stop-reason switches must handle `context_limit` and `pause`.

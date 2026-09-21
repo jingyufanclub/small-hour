@@ -68,6 +68,7 @@ test("OpenAI sends app context and exact schema in a stateless Responses request
   assert.deepEqual(request.body.text.format, { type: "json_schema", name: "small_hour_result", strict: true, schema });
   assert.deepEqual(result.value, { selectedId: "item-7" });
   assert.equal(result.modelCalls[0].requestId, "request-1");
+  assert.deepEqual(result.modelCalls[0].stop, { reason: "end_turn" });
   assert.deepEqual(result.usage[0], { model: "test-model", freshInputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0, outputTokens: 8 });
 });
 
@@ -92,6 +93,7 @@ test("OpenAI preserves native reasoning, phases, and tool call IDs through a rea
   assert.deepEqual(requests[1].body.input.slice(1, 1 + native.length), native);
   assert.deepEqual(requests[1].body.input.at(-1), { type: "function_call_output", call_id: "call-7", output: '{"id":"item-7","available":true}' });
   assert.equal(result.toolCalls[0].id, "call-7");
+  assert.deepEqual(result.modelCalls.map(call => call.stop), [{ reason: "tool_use" }, { reason: "end_turn" }]);
 });
 
 test("OpenAI accepts a completed answer with a null phase", async () => {
@@ -126,6 +128,7 @@ test("local compatibility preserves native history and sends no implicit cloud c
   assert.equal(requests[0].body.tools[0].function.name, "lookup");
   assert.deepEqual(requests[1].body.messages.at(-1), { role: "tool", tool_call_id: "local-call", content: '{"id":"item-7","available":true}' });
   assert.deepEqual(requests[1].body.messages.at(-2), native);
+  assert.deepEqual(result.modelCalls.map(call => call.stop), [{ reason: "tool_use" }, { reason: "end_turn" }]);
 });
 
 test("local structured output requires explicit capability and retains host validation", async () => {
@@ -244,7 +247,10 @@ for (const protocol of ["responses", "chat"] as const) {
         assert.equal(result.toolCalls[0].status, "not_started");
       } else {
         const pending = runtime(make(fetch), { tools, retry: { attempts: 3, delayMs: () => 0 } }).turn(input);
-        if (kind === "refusal" || kind === "filter") await failure(pending, kind === "refusal" ? "provider_refused" : "provider_filtered");
+        if (kind === "refusal" || kind === "filter") {
+          const report = await failure(pending, kind === "refusal" ? "provider_refused" : "provider_filtered");
+          assert.deepEqual(report.modelCalls[0].stop, { reason: kind === "refusal" ? "refusal" : "content_filter" });
+        }
         else await assert.rejects(pending, RuntimeError);
         assert.equal(requests.length, 1);
       }
@@ -281,6 +287,7 @@ for (const protocol of ["responses", "chat"] as const) {
       assert.equal(acceptedOutputHandlers, 0);
       assert.equal(requests.length, 1);
       assert.equal(report.modelCalls[0].status, "responded");
+      assert.deepEqual(report.modelCalls[0].stop, { reason: "max_tokens" });
       assert.equal(report.modelCalls[0].requestId, "request-1");
       assert.equal(report.toolCalls.length, 0);
     });

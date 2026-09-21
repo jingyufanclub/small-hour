@@ -27,6 +27,12 @@ Configure `modelCalls.admit(context)` to authorize each provider attempt. It mus
 
 Accounting failure stops further calls. Reports retain `unrecorded` until the accounting callback finishes. `usage.record` remains available for successful-response telemetry; avoid charging the same call through both hooks. The optional [spending store](model-spending.md) supplies persistent reservation and settlement.
 
+Responded calls retain `stop: { reason, nativeReason? }` before checkpointing and accounting. `reason` uses the same provider-neutral values as `ProviderResponse.stopReason`; `context_limit` means context exhaustion and `pause` means unsupported provider continuation. Anthropic's original `stop_reason` is preserved as `nativeReason` when present. Other adapters and custom providers can omit native evidence. Only `tool_use` permits tool dispatch; final output requires `end_turn` or `stop_sequence` and the usual output checks. Refusal, truncation, pause and unknown stops authorize no extra calls or partial output.
+
+A known stop does not prove known cost: a refused response can still have chargeable usage, and missing usage retains uncertainty. Older saved calls can lack `stop`; absence means unavailable evidence. This metadata does not retain provider content or create a continuation policy.
+
+`ModelCallRecord` is a discriminated union: only `responded` calls can carry stop evidence. Consumer record extensions should use an intersection type. Invalid stop metadata from a custom provider stops acceptance after preserving valid usage and running accounting.
+
 A call limit does not establish a monetary ceiling. Applications supply prices, conservative reservation estimates, and stable budget scopes. Model calls inside tools or context loaders need their own admission boundary.
 
 ## Cancellation and reports

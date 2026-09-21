@@ -1,4 +1,5 @@
 import type { StructuredTurnResult, TurnReport, TurnResult } from "../types.js";
+import { readModelCallStop } from "../model-call-record.js";
 import { canonicalJson } from "./json.js";
 
 export type SavedTurn = TurnResult | StructuredTurnResult<unknown>;
@@ -39,6 +40,7 @@ export function readReport(value: unknown): TurnReport {
     requireValue(text(call.accounting) && ["unrecorded", "recorded"].includes(call.accounting));
     requireValue(call.requestId === undefined || typeof call.requestId === "string");
     if (call.usage !== undefined) usage(call.usage);
+    readModelCallStop(call);
   }
   list(row.usage).forEach(usage);
   return row as unknown as TurnReport;
@@ -61,6 +63,8 @@ export function readResult(value: unknown): SavedTurn {
   const issues = list(row.issues);
   requireValue(typeof row.output === "string" && issues.every(issue => typeof issue === "string"));
   requireValue(row.finishReason === "end_turn" || row.finishReason === "stop_sequence");
+  const finalStop = report.modelCalls.at(-1)?.stop;
+  requireValue(finalStop === undefined || finalStop.reason === row.finishReason);
   if (row.status === "structured") {
     requireValue(row.accepted === true && issues.length === 0 && "value" in row);
     requireValue(report.choice === undefined && report.toolCalls.length === 0);

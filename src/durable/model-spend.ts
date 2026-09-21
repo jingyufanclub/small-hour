@@ -1,4 +1,5 @@
 import { types } from "node:util";
+import { readModelCallStop } from "../model-call-record.js";
 import type { ModelCallContext, ModelCallHooks, ModelCallRecord, TokenUsage } from "../types.js";
 import { canonicalJson } from "./json.js";
 import type { SqliteDatabase } from "./sqlite.js";
@@ -95,8 +96,10 @@ function record(value: Readonly<ModelCallRecord>, context: CallIdentity): ModelC
     for (const tokens of [freshInputTokens, cacheWriteTokens, cacheReadTokens, outputTokens]) amount(tokens);
     usage = { model, freshInputTokens, cacheWriteTokens, cacheReadTokens, outputTokens };
   }
-  return { callId: value.callId, provider: value.provider, attempt: value.attempt, hop: value.hop, status: value.status,
-    accounting: "unrecorded", ...(value.requestId === undefined ? {} : { requestId: value.requestId }), ...(usage ? { usage } : {}) };
+  const stop = readModelCallStop(value);
+  const base = { callId: value.callId, provider: value.provider, attempt: value.attempt, hop: value.hop,
+    accounting: "unrecorded" as const, ...(value.requestId === undefined ? {} : { requestId: value.requestId }), ...(usage ? { usage } : {}) };
+  return value.status === "responded" ? { ...base, status: value.status, ...(stop ? { stop } : {}) } : { ...base, status: value.status };
 }
 
 function resolution(value: ModelSpendResolution): ModelSpendResolution {
