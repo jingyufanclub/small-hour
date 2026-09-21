@@ -9,7 +9,7 @@ A workflow specifies `kind`, `version`, unique ordered steps, and synchronous `a
 | Step | Callback |
 | --- | --- |
 | `local` | Synchronous `execute(database, context)` and JSON-preserving `parseResult(value)`. |
-| `model` | Synchronous `prepare(context)` returning `{ runtime, input }`. |
+| `model` | Synchronous `prepare(context)` returning `{ runtime, input }`; optional initial `recovery` contract. |
 | `delivery` | A consumer-supplied sink; must be the workflow's only step. See [delivery](delivery.md). |
 
 Local executors perform synchronous SQL work only. See [local operations](local-operations.md).
@@ -34,7 +34,11 @@ Leases renew between steps. Set `leaseMs` above the longest step; no heartbeat e
 
 `retry(error, context)` may return `{ dueAt, reason }` only for rolled-back local attempts within the limit. Incomplete model work is never replayed automatically. Provider retries remain in the core.
 
-`cancel(key, reason)` immediately stops queued/deferred tasks and records requests for running or uncertain delivery tasks. Committed effects remain. Aborted workers defer safe unstarted work; unknown effects retain the scope.
+A model step may initially opt in with `recovery: { sideEffectFree: true, maxAttempts, maxModelCalls }`. Its turn must be tool-free and its preparation, context sources and output checks must have no effects. The limits become part of the immutable task manifest. Existing steps without this contract cannot gain recovery later.
+
+After inspecting an uncertain task, the application may call `retryModel(key, { stepId, action: "retry", checkpoint: step.model.checkpoint, reason, evidence }, { signal? })`. The decision must refer to the first unfinished model step and its exact current evidence. Recovery consumes a task claim and a model attempt, rechecks current authorization and cancellation, and preserves prior local receipts. Each model attempt has separate reports and spending records; the model call limit spans all attempts. A completed result is reused without regeneration. See [model steps](model-steps.md) for spending reconciliation and recovery eligibility.
+
+`cancel(key, reason)` immediately stops queued/deferred tasks and records requests for running or uncertain tasks. Committed effects remain. Aborted workers defer safe unstarted work; unknown effects retain the scope.
 
 `resolve(key, { status: "failed" | "cancelled", reason, evidence })` closes uncertain work after verification that old effects cannot continue unexpectedly. Exact repeats are safe. It does not reset steps, replay effects, or refund spending.
 
