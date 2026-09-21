@@ -1,6 +1,7 @@
 import { types } from "node:util";
 import { canonicalJson } from "./json.js";
-export { SqliteModelStepStore, ModelStepError, type ModelStepState, type ModelStepResult, type ModelStepGuard } from "./model-steps.js";
+export { SqliteModelStepStore, ModelStepError, type ModelStepState, type ModelStepResult, type ModelStepGuard,
+  type ModelRecoveryContract, type ModelStepRecoveryDecision, type ModelStepAttempt, type ModelStepOptions } from "./model-steps.js";
 export { SqliteModelSpendStore, ModelSpendError, type ModelSpendQuote, type ModelSpendPolicy,
   type ModelSpendResolution, type ModelSpendRecord, type ModelSpendBudget } from "./model-spend.js";
 export { SqliteTaskRunner, TaskError, type TaskWorkflow, type TaskStep, type TaskContext,

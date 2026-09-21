@@ -4,7 +4,8 @@ import type { SmallHourRuntime } from "../runtime.js";
 import type { StructuredTurnInput, TurnInput } from "../types.js";
 import { canonicalJson } from "./json.js";
 import { DeliveryLedger, acceptedDelivery, conflictingDeliveryReceipts, deliveryKey, type DeliverySink, type DeliveryState, type DeliveryOutcome } from "./delivery.js";
-import { SqliteModelStepStore, type ModelStepState } from "./model-steps.js";
+import { SqliteModelStepStore, readModelRecoveryContract, readModelStepRecoveryDecision,
+  type ModelRecoveryContract, type ModelStepRecoveryDecision, type ModelStepState } from "./model-steps.js";
 import { SqliteOperationStore, type OperationRequest, type SqliteDatabase } from "./sqlite.js";
 
 export type TaskStatus = "queued" | "running" | "deferred" | "completed" | "cancelled" | "rejected" | "failed" | "uncertain";
@@ -20,7 +21,8 @@ export interface TaskContext {
 }
 export type TaskStep<Database> = { id: string } & (
   | { kind: "local"; execute(database: Database, context: TaskContext): unknown; parseResult(value: unknown): unknown }
-  | { kind: "model"; prepare(context: TaskContext): { runtime: SmallHourRuntime; input: TurnInput | StructuredTurnInput<unknown> } }
+  | { kind: "model"; recovery?: ModelRecoveryContract;
+    prepare(context: TaskContext): { runtime: SmallHourRuntime; input: TurnInput | StructuredTurnInput<unknown> } }
   | { kind: "delivery"; sink: DeliverySink }
 );
 export interface TaskWorkflow<Database> {
@@ -66,9 +68,11 @@ export class TaskError extends Error {
 }
 type Stop = { status: "cancelled" | "rejected" | "deferred"; reason: string; dueAt?: number };
 class TaskStopped extends Error { constructor(readonly outcome: Stop) { super(outcome.reason); } }
-type Plan = ({ id: string; kind: "local" | "model" } | { id: string; kind: "delivery"; idempotency: "key" | "none"; reconciliation: boolean })[];
+type Plan = ({ id: string; kind: "local" } | { id: string; kind: "model"; recovery?: ModelRecoveryContract }
+  | { id: string; kind: "delivery"; idempotency: "key" | "none"; reconciliation: boolean })[];
 type StoredTask = Omit<TaskState, "steps"> & { plan: Plan; token: string | null; scheduleJson: string };
 type Key = Pick<OperationRequest, "scope" | "id">;
+type ModelRecovery = ModelStepRecoveryDecision & { stepId: string };
 
 function nonempty(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value.trim()) throw new TypeError("Expected a nonempty string");
@@ -87,13 +91,14 @@ function schedule(value: TaskSchedule): TaskSchedule {
   nonempty(value.concurrencyScope); integer(value.dueAt); integer(value.maxAttempts, 1);
   return { concurrencyScope: value.concurrencyScope, dueAt: value.dueAt, maxAttempts: value.maxAttempts };
 }
-function plan(steps: readonly { id: string; kind: string; sink?: DeliverySink; idempotency?: string; reconciliation?: boolean }[]): Plan {
+function plan(steps: readonly { id: string; kind: string; sink?: DeliverySink; idempotency?: string; reconciliation?: boolean; recovery?: unknown }[]): Plan {
   if (!Array.isArray(steps) || !steps.length) throw new TypeError("A workflow requires ordered steps");
   const ids = new Set<string>();
   return steps.map(step => {
     nonempty(step.id);
     if (ids.has(step.id)) throw new TypeError("Repeated step");
     ids.add(step.id);
+    if (step.recovery !== undefined && step.kind !== "model") throw new TypeError("Only model steps support model recovery");
     if (step.kind === "delivery") {
       if (steps.length !== 1) throw new TypeError("A delivery workflow must contain only its fixed output handoff");
       const idempotency = step.sink ? step.sink.idempotency : step.idempotency;
@@ -102,6 +107,7 @@ function plan(steps: readonly { id: string; kind: string; sink?: DeliverySink; i
       return { id: step.id, kind: step.kind, idempotency, reconciliation };
     }
     if (step.kind !== "local" && step.kind !== "model") throw new TypeError("Invalid step");
+    if (step.kind === "model" && step.recovery !== undefined) return { id: step.id, kind: step.kind, recovery: readModelRecoveryContract(step.recovery) };
     return { id: step.id, kind: step.kind };
   });
 }
@@ -138,7 +144,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         || (step.sink.reconcile !== undefined && typeof step.sink.reconcile !== "function") || workflow.retry)) throw new TypeError("Delivery retries require sink evidence");
       return { ...workflow, steps: workflow.steps.map(step => step.kind === "delivery" ? { ...step, sink: {
         idempotency: step.sink.idempotency, send: step.sink.send.bind(step.sink), reconcile: step.sink.reconcile?.bind(step.sink),
-      } } : { ...step }) };
+      } } : step.kind === "model" && step.recovery !== undefined ? { ...step, recovery: readModelRecoveryContract(step.recovery) } : { ...step }) };
     });
     this.operations = new SqliteOperationStore(database); this.models = new SqliteModelStepStore(database);
     this.deliveries = new DeliveryLedger(database);
@@ -228,7 +234,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     nonempty(reason);
     this.transaction(() => {
       const task = this.required(key);
-      if (!["queued", "deferred", "running"].includes(task.status) && !(task.status === "uncertain" && task.plan[0].kind === "delivery")) return;
+      if (!["queued", "deferred", "running", "uncertain"].includes(task.status)) return;
       this.changed(this.database.prepare(`UPDATE small_hour_tasks SET cancellation_reason = ?,
         status = CASE WHEN status IN ('running', 'uncertain') THEN status ELSE 'cancelled' END,
         reason = CASE WHEN status IN ('running', 'uncertain') THEN reason ELSE ? END WHERE scope = ? AND id = ?`)
@@ -258,9 +264,9 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     return this.executeClaimed(claimed, options);
   }
 
-  private async executeClaimed(claimed: StoredTask, options: { signal?: AbortSignal }): Promise<TaskRunResult | undefined> {
+  private async executeClaimed(claimed: StoredTask, options: { signal?: AbortSignal }, recovery?: ModelRecovery): Promise<TaskRunResult | undefined> {
     if (claimed.status !== "running") return this.inspect(claimed);
-    if (this.inspect(claimed)!.steps.some(step => step.kind === "model" && step.status === "unresolved")) {
+    if (!recovery && this.inspect(claimed)!.steps.some(step => step.kind === "model" && step.status === "unresolved")) {
       return this.finish(claimed, "uncertain", "model_step_unresolved");
     }
     const workflow = this.definition(claimed);
@@ -305,14 +311,23 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
           localAttempt = false;
         } else {
           const existing = this.models.inspect(request);
-          if (!existing) assertActive();
+          const recovering = recovery?.stepId === step.id;
+          if (!existing || recovering) assertActive();
           const prepared = sync(step.prepare(context()));
           const signal = options.signal && prepared.input.signal ? AbortSignal.any([options.signal, prepared.input.signal]) : options.signal ?? prepared.input.signal;
           const input = { ...prepared.input, signal };
-          const guard = { assertActive };
-          const saved = input.structuredOutput
-            ? await this.models.run(request, prepared.runtime, input as StructuredTurnInput<unknown>, guard)
-            : await this.models.run(request, prepared.runtime, input as TurnInput, guard);
+          const guard = { assertActive, recovery: step.recovery };
+          let saved;
+          if (recovery && recovering) {
+            const { stepId: _stepId, ...decision } = recovery;
+            saved = input.structuredOutput
+              ? await this.models.recover(request, prepared.runtime, input as StructuredTurnInput<unknown>, decision, guard)
+              : await this.models.recover(request, prepared.runtime, input as TurnInput, decision, guard);
+          } else {
+            saved = input.structuredOutput
+              ? await this.models.run(request, prepared.runtime, input as StructuredTurnInput<unknown>, guard)
+              : await this.models.run(request, prepared.runtime, input as TurnInput, guard);
+          }
           result = saved.result;
           if (saved.result.status === "rejected") return this.finish(claimed, "rejected", "model_output_rejected");
         }
@@ -338,6 +353,21 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       }
     }
     return this.finish(claimed, "completed", null);
+  }
+
+  async retryModel(key: Key, decision: ModelRecovery, options: { signal?: AbortSignal } = {}): Promise<TaskRunResult | undefined> {
+    if (options.signal?.aborted) return undefined;
+    let recovery: ModelRecovery;
+    try {
+      const { stepId, ...record } = decision;
+      nonempty(stepId);
+      recovery = { stepId, ...readModelStepRecoveryDecision(record) };
+    } catch (cause) { throw new TaskError("invalid_request", "Model recovery requires a step, inspected checkpoint and application decision.", { cause }); }
+    const task = this.required(key);
+    if (task.status !== "uncertain") throw new TaskError("task_changed", "Only uncertain tasks accept model recovery.");
+    if (task.cancellationReason) return this.inspect(task);
+    const claimed = this.claim(key, recovery);
+    return claimed ? this.executeClaimed(claimed, options, recovery) : undefined;
   }
 
   async retryDelivery(key: Key, options: { signal?: AbortSignal } = {}): Promise<TaskRunResult | undefined> {
@@ -405,7 +435,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     }
   }
 
-  private claim(key?: Key): StoredTask | undefined {
+  private claim(key?: Key, recovery?: ModelRecovery): StoredTask | undefined {
     if (!this.workflows.length) return undefined;
     return this.transaction(() => {
       const now = this.time();
@@ -417,11 +447,22 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
           AND (other.scope != t.scope OR other.id != t.id) AND other.status IN ('running', 'uncertain'))
         ORDER BY t.due_at, t.scope, t.id LIMIT 1`)
         .get(...this.workflows.flatMap(workflow => [workflow.kind, workflow.version]), ...(key ? [key.scope, key.id] : [now, now])) as Key | undefined;
-      if (!candidate) return undefined;
+      if (!candidate) {
+        if (key && recovery && this.required(key).status !== "uncertain") throw new TaskError("task_changed", "The task is no longer available for model recovery.");
+        return undefined;
+      }
       const task = this.required(candidate);
-      this.snapshot(task);
+      const snapshot = this.snapshot(task)!;
       const workflow = this.definition(task);
       if (canonicalJson(plan(workflow.steps)) !== canonicalJson(task.plan)) throw new TaskError("contract_conflict", "The stored task requires its original step manifest.");
+      if (recovery) {
+        const step = snapshot.steps.find(step => step.status !== "completed");
+        if (step?.kind !== "model" || step.status !== "unresolved" || step.id !== recovery.stepId) {
+          throw new TaskError("task_changed", "The selected model step is no longer awaiting recovery.");
+        }
+        if (!step.model.recovery) throw new TaskError("invalid_request", "This model step did not opt in to recovery.");
+        if (step.model.checkpoint !== recovery.checkpoint) throw new TaskError("task_changed", "Model recovery requires the current inspected checkpoint.");
+      }
       if (task.attempts >= task.maxAttempts) {
         const delivery = task.plan[0].kind === "delivery" ? this.deliveries.inspect(task) : undefined;
         const delivered = delivery && acceptedDelivery(delivery);
