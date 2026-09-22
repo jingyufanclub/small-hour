@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource } from "small-hour";
+import { EmptyMemorySource, IMAGE_INPUT_LIMITS, SmallHourRuntime, StaticPersonaSource } from "small-hour";
 import { AnthropicProvider } from "small-hour/providers/anthropic";
 import { OpenAIProvider } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
@@ -35,28 +35,47 @@ const structured = await create({ name: "fixture", capabilities: { structuredOut
 } } });
 assert.equal(structured.status, "structured"); assert.deepEqual(structured.value, { selectedId: "item-7" });
 
+const image = { type: "image", mediaType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC" };
+const imageInput = { ...input, input: [{ type: "text", text: "Inspect item-7." }, image] };
+assert.equal(IMAGE_INPUT_LIMITS.maxImages, 20); assert.ok(Object.isFrozen(IMAGE_INPUT_LIMITS));
+let imageCalls = 0;
+const vision = create(new OpenAIProvider({ model: "fixture", apiKey: "fixture-only", reasoningEffort: "max", fetch: async (_url, init) => {
+  imageCalls++;
+  const body = JSON.parse(init.body);
+  assert.deepEqual(body.reasoning, { effort: "max" });
+  assert.deepEqual(body.input, [{ role: "user", content: [{ type: "input_text", text: "Inspect item-7." },
+    { type: "input_image", image_url: `data:${image.mediaType};base64,${image.data}` }] }]);
+  return new Response(JSON.stringify({ id: "response-1", status: "completed", output: [
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "item-7 inspected." }] },
+  ] }), { headers: { "content-type": "application/json" } });
+} }));
+assert.equal((await vision.turn(imageInput)).output, "item-7 inspected.");
+assert.equal(imageCalls, 1);
+await assert.rejects(create(adapters[2]).turn(imageInput), { code: "images_unsupported" });
+
 if (!process.argv.includes("--core-only")) {
   const { DatabaseSync } = await import("node:sqlite");
   const path = join(process.cwd(), "consumer.sqlite"), recovery = { sideEffectFree: true, maxAttempts: 2, maxModelCalls: 2 };
   const request = { scope: "consumer", id: "select-1", kind: "selection", version: "1", input: { id: "item-7" } };
   let db = new DatabaseSync(path), store = new SqliteModelStepStore(db), attempts = 0;
   store.initialize();
-  const model = create({ name: "fixture", async complete() {
+  const model = create({ name: "fixture", capabilities: { images: true }, async complete(request) {
+    assert.deepEqual(request.messages.at(-1).content, imageInput.input);
     attempts++;
     return attempts === 1 ? { ...answer("partial"), stopReason: "context_limit", nativeStopReason: "fixture_context_limit" } : answer("item-7 is selected.");
   } });
   try {
-    await assert.rejects(store.run(request, model, input, { recovery }), { code: "incomplete_stop" });
+    await assert.rejects(store.run(request, model, imageInput, { recovery }), { code: "incomplete_stop" });
     const failed = store.inspect(request);
     assert.equal(failed.status, "failed");
     assert.deepEqual(failed.report.modelCalls[0].stop, { reason: "context_limit", nativeReason: "fixture_context_limit" });
     db.close(); db = new DatabaseSync(path); store = new SqliteModelStepStore(db); store.initialize();
     assert.deepEqual(store.inspect(request), failed);
-    await assert.rejects(store.run(request, model, input, { recovery }), { code: "step_unresolved" });
-    const recovered = await store.recover(request, model, input, { action: "retry", checkpoint: failed.checkpoint,
+    await assert.rejects(store.run(request, model, imageInput, { recovery }), { code: "step_unresolved" });
+    const recovered = await store.recover(request, model, imageInput, { action: "retry", checkpoint: failed.checkpoint,
       reason: "Authorize another tool-free attempt.", evidence: { policy: "consumer-fixture-v1" } });
     assert.equal(recovered.result.output, "item-7 is selected."); assert.equal(recovered.replayed, false);
-    const replay = await store.run(request, model, input, { recovery });
+    const replay = await store.run(request, model, imageInput, { recovery });
     assert.equal(replay.replayed, true); assert.deepEqual(replay.result, recovered.result); assert.equal(attempts, 2);
     const state = store.inspect(request);
     assert.equal(state.status, "completed"); assert.equal(state.attempts.length, 2);

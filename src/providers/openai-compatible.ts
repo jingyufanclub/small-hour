@@ -1,4 +1,5 @@
 import { RuntimeError, type AssistantBlock, type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse } from "../types.js";
+import { validateImageMessages } from "../input.js";
 import { array, endpoint, httpFailureInfo, invalidResponse, isObject, isRetryableHttpError, object, opaquePayload, postJson, string, tokenUsage } from "./http.js";
 
 export interface OpenAICompatibleProviderOptions {
@@ -9,7 +10,7 @@ export interface OpenAICompatibleProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-function chatMessages(messages: ProviderMessage[]): unknown[] {
+function chatMessages(messages: readonly ProviderMessage[]): unknown[] {
   return messages.flatMap((message): unknown[] => {
     if (typeof message.content === "string") return [{ role: message.role, content: message.content }];
     if (message.role === "assistant") {
@@ -24,9 +25,11 @@ function chatMessages(messages: ProviderMessage[]): unknown[] {
       }
       return [{ role: "assistant", content: text.length ? text.join("") : null, ...(calls.length ? { tool_calls: calls } : {}) }];
     }
-    return message.content.map((block) => block.type === "text"
-      ? { role: "user", content: block.text }
-      : { role: "tool", tool_call_id: block.toolUseId, content: block.content });
+    return message.content.map((block) => {
+      if (block.type === "image") throw new RuntimeError("compatible provider does not support image input", "images_unsupported");
+      return block.type === "text" ? { role: "user", content: block.text }
+        : { role: "tool", tool_call_id: block.toolUseId, content: block.content };
+    });
   });
 }
 
@@ -64,9 +67,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
   constructor(private readonly options: OpenAICompatibleProviderOptions) {
     if (!options.model.trim()) throw new TypeError("compatible provider model is required");
     this.url = endpoint(options.baseURL, "chat/completions");
-    this.capabilities = { tools: options.capabilities?.tools === true, structuredOutput: options.capabilities?.structuredOutput === true, thinkingBudget: false };
+    this.capabilities = { tools: options.capabilities?.tools === true, structuredOutput: options.capabilities?.structuredOutput === true, thinkingBudget: false, images: false };
   }
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    validateImageMessages(request.messages, false);
     if (request.thinking) throw new RuntimeError("compatible provider does not support a thinking token budget", "thinking_unsupported");
     if (request.tools.length && !this.capabilities.tools) throw new RuntimeError("tool support must be enabled for this model and server", "tools_unsupported");
     if (request.outputSchema && !this.capabilities.structuredOutput) throw new RuntimeError("structured output support must be enabled for this model and server", "structured_output_unsupported");

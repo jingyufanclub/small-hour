@@ -6,12 +6,13 @@ Small Hour is a provider-neutral TypeScript runtime for application-defined LLM 
 
 - Anthropic, OpenAI Responses, and OpenAI-compatible Chat Completions adapters.
 - Fresh application-supplied instructions and memory on each turn.
+- Ordered text and image input through Anthropic and OpenAI Responses.
 - Sequential tools, per-turn allowlists, validated choices, and structured results.
 - Bounded model calls, retries, deadlines, tokens, and tool results.
 - Execution reports with accepted decisions, usage, tool outcomes, and receipt references.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.3.0; the API is under development. Text, tools, and structured results are supported. Streaming, image input, and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.4.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Setup
 
@@ -39,6 +40,7 @@ Provider retries are owned by the runtime; SDK retries are disabled. The optiona
 | Turns, tools, choices, results | [Embedding](docs/embedding.md) |
 | Limits, accounting, cancellation | [Execution](docs/execution.md) |
 | Models and endpoints | [Providers](docs/providers.md) |
+| Image selection, limits and storage | [Image input](docs/images.md) |
 | Atomic local effects | [Local operations](docs/local-operations.md) |
 | Saved model results | [Model steps](docs/model-steps.md) |
 | Persistent budgets | [Model spending](docs/model-spending.md) |

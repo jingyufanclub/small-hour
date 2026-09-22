@@ -1,4 +1,5 @@
-import { SmallHourRuntime, EmptyMemorySource, StaticPersonaSource, type ModelProvider, type ProviderStop } from "small-hour";
+import { SmallHourRuntime, EmptyMemorySource, StaticPersonaSource, IMAGE_INPUT_LIMITS,
+  type InputContent, type ImageBlock, type ModelProvider, type ProviderStop } from "small-hour";
 import { AnthropicProvider, type AnthropicProviderOptions } from "small-hour/providers/anthropic";
 import { OpenAIProvider, type OpenAIProviderOptions } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider, type OpenAICompatibleProviderOptions } from "small-hour/providers/openai-compatible";
@@ -6,10 +7,14 @@ import { SqliteModelStepStore, SqliteTaskRunner, type ModelRecoveryContract, typ
   type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow } from "small-hour/durable/sqlite";
 
 const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only", thinking: { type: "adaptive", effort: "medium" } };
-const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only" };
+const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only", reasoningEffort: "max" };
 const compatible: OpenAICompatibleProviderOptions = { model: "fixture", baseURL: "http://fixture.invalid/v1" };
 const providers: ModelProvider[] = [new AnthropicProvider(anthropic), new OpenAIProvider(openai), new OpenAICompatibleProvider(compatible)];
 const runtime = new SmallHourRuntime({ provider: providers[0], persona: new StaticPersonaSource("Use the supplied ID."), memory: new EmptyMemorySource() });
+const image: ImageBlock = { type: "image", mediaType: "image/png", data: "iVBORw0KGgo=" };
+const imageInput: InputContent = [{ type: "text", text: "Inspect." }, image];
+export const imageLimits = IMAGE_INPUT_LIMITS;
+export const verifyImageTypes = () => runtime.turn({ agentId: "consumer", input: imageInput });
 const recovery: ModelRecoveryContract = { sideEffectFree: true, maxAttempts: 2, maxModelCalls: 2 };
 const options: ModelStepOptions = { recovery };
 const request = { scope: "consumer", id: "select-1", kind: "selection", version: "1", input: { id: "item-7" } };

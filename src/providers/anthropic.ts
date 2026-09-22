@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { validateImageMessages } from "../input.js";
 import {
   RuntimeError,
   type AssistantBlock,
@@ -24,7 +25,7 @@ function anthropicSystem(blocks: SystemBlock[]): Anthropic.TextBlockParam[] {
   }));
 }
 
-function anthropicMessages(messages: ProviderMessage[]): Anthropic.MessageParam[] {
+function anthropicMessages(messages: readonly ProviderMessage[]): Anthropic.MessageParam[] {
   return messages.map((message) => {
     if (typeof message.content === "string") return { role: message.role, content: message.content };
     if (message.role === "assistant") {
@@ -41,7 +42,9 @@ function anthropicMessages(messages: ProviderMessage[]): Anthropic.MessageParam[
       role: "user",
       content: message.content.map((block) => block.type === "text"
         ? { type: "text", text: block.text }
-        : { type: "tool_result", tool_use_id: block.toolUseId, content: block.content, ...(block.isError ? { is_error: true } : {}) }) as Anthropic.ContentBlockParam[],
+        : block.type === "image"
+          ? { type: "image", source: { type: "base64", media_type: block.mediaType, data: block.data } }
+          : { type: "tool_result", tool_use_id: block.toolUseId, content: block.content, ...(block.isError ? { is_error: true } : {}) }) as Anthropic.ContentBlockParam[],
     };
   });
 }
@@ -76,7 +79,7 @@ function tokenUsage(message: Anthropic.Message): ProviderResponse["usage"] {
 
 export class AnthropicProvider implements ModelProvider {
   readonly name = "anthropic";
-  readonly capabilities: { structuredOutput: true; thinkingBudget: boolean };
+  readonly capabilities: { structuredOutput: true; thinkingBudget: boolean; images: true };
   private readonly client: Anthropic;
   private readonly thinking?: AnthropicProviderOptions["thinking"];
 
@@ -93,11 +96,12 @@ export class AnthropicProvider implements ModelProvider {
       }
       this.thinking = { type: "adaptive", ...(thinking.effort === undefined ? {} : { effort: thinking.effort }) };
     }
-    this.capabilities = { structuredOutput: true, thinkingBudget: this.thinking === undefined };
+    this.capabilities = { structuredOutput: true, thinkingBudget: this.thinking === undefined, images: true };
     this.client = options.client ?? new Anthropic({ apiKey: options.apiKey, maxRetries: 0 });
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    validateImageMessages(request.messages, true);
     if (this.thinking && request.thinking) throw new RuntimeError("adaptive thinking cannot use a manual thinking budget", "thinking_unsupported");
     const message = await this.client.messages.create({
       model: this.options.model,
