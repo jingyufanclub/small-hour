@@ -5,7 +5,7 @@ import { OpenAICompatibleProvider, type OpenAICompatibleProviderOptions } from "
 import { SqliteModelStepStore, SqliteTaskRunner, type ModelRecoveryContract, type ModelStepOptions,
   type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow } from "small-hour/durable/sqlite";
 
-const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only" };
+const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only", thinking: { type: "adaptive", effort: "medium" } };
 const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only" };
 const compatible: OpenAICompatibleProviderOptions = { model: "fixture", baseURL: "http://fixture.invalid/v1" };
 const providers: ModelProvider[] = [new AnthropicProvider(anthropic), new OpenAIProvider(openai), new OpenAICompatibleProvider(compatible)];

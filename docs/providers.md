@@ -12,7 +12,20 @@ Adapters translate messages, tools, reasoning, stop reasons, and usage. Configur
 
 Configure the model and credentials. Structured output uses [`output_config.format`](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) with the supplied schema unchanged. Provider schema support and the application parser both apply.
 
-`maxTokens` bounds ordinary output; an explicit thinking budget is added where supported. Native signed thinking and other opaque blocks are echoed unchanged within the turn.
+For models supporting adaptive thinking, configure it explicitly on the adapter:
+
+```ts
+const provider = new AnthropicProvider({
+  model,
+  thinking: { type: "adaptive", effort: "medium" },
+});
+```
+
+Adaptive mode uses `maxTokens` as the total per-call output ceiling, including thinking. Effort is optional soft guidance, not a token or spending limit; supported levels depend on the selected model. Small Hour does not infer capabilities from model names or choose effort automatically. The adapter snapshots its thinking configuration when constructed. Structured-output schemas and effort are sent together.
+
+Do not combine adaptive mode with a turn's `thinking.budgetTokens`; the runtime rejects that combination before context loading or model admission. Without adapter thinking configuration, requests retain their existing behavior: a manual turn budget sends `thinking.type: "enabled"` and adds that budget to `maxTokens` for the combined output ceiling. Choose a model that supports the requested mode. See [Anthropic thinking](https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost).
+
+Native signed thinking and other opaque blocks are echoed unchanged within the turn and excluded from final text. Spending quotes must cover the full output allowance and input costs. Bind model, thinking mode, effort and pricing revisions into the application's immutable [model-step contract](model-steps.md); adapter settings are not fingerprinted automatically.
 
 ## OpenAI
 

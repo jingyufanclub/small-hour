@@ -1,6 +1,6 @@
 # Small Hour
 
-Small Hour is a TypeScript LLM runtime with tool execution, saved progress, spending controls, and recovery from failures.
+Small Hour is a provider-neutral TypeScript runtime for application-defined LLM workflows, with tool execution, saved progress, spending controls, and recovery from failures.
 
 ## Capabilities
 
@@ -11,7 +11,7 @@ Small Hour is a TypeScript LLM runtime with tool execution, saved progress, spen
 - Execution reports with accepted decisions, usage, tool outcomes, and receipt references.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.2.0; the API is under development. Text, tools, and structured results are supported. Streaming, image input, and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.3.0; the API is under development. Text, tools, and structured results are supported. Streaming, image input, and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Setup
 

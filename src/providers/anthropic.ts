@@ -1,17 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type {
-  AssistantBlock,
-  ModelProvider,
-  ProviderMessage,
-  ProviderRequest,
-  ProviderResponse,
-  SystemBlock,
+import {
+  RuntimeError,
+  type AssistantBlock,
+  type ModelProvider,
+  type ProviderMessage,
+  type ProviderRequest,
+  type ProviderResponse,
+  type SystemBlock,
 } from "../types.js";
 
 export interface AnthropicProviderOptions {
   model: string;
   client?: Anthropic;
   apiKey?: string;
+  thinking?: { type: "adaptive"; effort?: "low" | "medium" | "high" | "xhigh" | "max" };
 }
 
 function anthropicSystem(blocks: SystemBlock[]): Anthropic.TextBlockParam[] {
@@ -74,17 +76,29 @@ function tokenUsage(message: Anthropic.Message): ProviderResponse["usage"] {
 
 export class AnthropicProvider implements ModelProvider {
   readonly name = "anthropic";
-  readonly capabilities = { structuredOutput: true };
+  readonly capabilities: { structuredOutput: true; thinkingBudget: boolean };
   private readonly client: Anthropic;
+  private readonly thinking?: AnthropicProviderOptions["thinking"];
 
   get model(): string { return this.options.model; }
 
   constructor(private readonly options: AnthropicProviderOptions) {
     if (!options.model.trim()) throw new TypeError("Anthropic model is required");
+    const thinking = options.thinking;
+    if (thinking !== undefined) {
+      if (!thinking || typeof thinking !== "object" || Array.isArray(thinking) || thinking.type !== "adaptive"
+        || Object.keys(thinking).some(key => key !== "type" && key !== "effort")
+        || (thinking.effort !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(thinking.effort))) {
+        throw new TypeError("Anthropic thinking requires adaptive mode and an optional supported effort");
+      }
+      this.thinking = { type: "adaptive", ...(thinking.effort === undefined ? {} : { effort: thinking.effort }) };
+    }
+    this.capabilities = { structuredOutput: true, thinkingBudget: this.thinking === undefined };
     this.client = options.client ?? new Anthropic({ apiKey: options.apiKey, maxRetries: 0 });
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    if (this.thinking && request.thinking) throw new RuntimeError("adaptive thinking cannot use a manual thinking budget", "thinking_unsupported");
     const message = await this.client.messages.create({
       model: this.options.model,
       max_tokens: request.maxTokens + (request.thinking?.budgetTokens ?? 0),
@@ -97,8 +111,12 @@ export class AnthropicProvider implements ModelProvider {
           strict: tool.strict ?? true,
         })),
       } : {}),
-      ...(request.thinking ? { thinking: { type: "enabled" as const, budget_tokens: request.thinking.budgetTokens } } : {}),
-      ...(request.outputSchema ? { output_config: { format: { type: "json_schema" as const, schema: request.outputSchema } } } : {}),
+      ...(this.thinking ? { thinking: { type: "adaptive" as const } }
+        : request.thinking ? { thinking: { type: "enabled" as const, budget_tokens: request.thinking.budgetTokens } } : {}),
+      ...(this.thinking?.effort || request.outputSchema ? { output_config: {
+        ...(this.thinking?.effort ? { effort: this.thinking.effort } : {}),
+        ...(request.outputSchema ? { format: { type: "json_schema" as const, schema: request.outputSchema } } : {}),
+      } } : {}),
       messages: anthropicMessages(request.messages),
     }, { signal: request.signal, maxRetries: 0 });
 
