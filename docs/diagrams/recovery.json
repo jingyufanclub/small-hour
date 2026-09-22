@@ -1,0 +1,156 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Small Hour: inspect saved work before continuing",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "hidden"
+    }
+  },
+  "lanes": [
+    {
+      "id": "saved-evidence",
+      "label": "Saved model step"
+    },
+    {
+      "id": "host-decision",
+      "label": "Application recovery"
+    },
+    {
+      "id": "stopped-work",
+      "label": "No further execution",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "inspect-step",
+    "reconcile-step",
+    "recovery-gate",
+    "retry-step"
+  ],
+  "nodes": [
+    {
+      "id": "inspect-step",
+      "lane": "saved-evidence",
+      "col": 0,
+      "type": "database",
+      "label": "Inspect stored step",
+      "sublabel": "Validate identity and contract",
+      "width": 210
+    },
+    {
+      "id": "replay-result",
+      "lane": "saved-evidence",
+      "col": 2,
+      "type": "backend",
+      "label": "Reuse saved result",
+      "sublabel": "No model or tool calls",
+      "width": 210
+    },
+    {
+      "id": "reconcile-step",
+      "lane": "host-decision",
+      "col": 0,
+      "type": "backend",
+      "label": "Check what happened",
+      "sublabel": "Effects, spending, prior attempts",
+      "width": 210
+    },
+    {
+      "id": "recovery-gate",
+      "lane": "host-decision",
+      "col": 1,
+      "type": "security",
+      "label": "Authorize recovery",
+      "sublabel": "Evidence + exact checkpoint",
+      "width": 210
+    },
+    {
+      "id": "retry-step",
+      "lane": "host-decision",
+      "col": 2,
+      "type": "backend",
+      "label": "New bounded attempt",
+      "sublabel": "Keep prior evidence and limits",
+      "width": 210
+    },
+    {
+      "id": "remain-stopped",
+      "lane": "stopped-work",
+      "col": 1,
+      "type": "security",
+      "label": "Keep work unresolved",
+      "sublabel": "Application decides the next action",
+      "width": 230
+    }
+  ],
+  "edges": [
+    {
+      "id": "completed-replay",
+      "from": "inspect-step",
+      "to": "replay-result",
+      "label": "Completed",
+      "variant": "emphasis",
+      "role": "branch"
+    },
+    {
+      "id": "unfinished-inspection",
+      "from": "inspect-step",
+      "to": "reconcile-step",
+      "label": "Started / failed",
+      "role": "main"
+    },
+    {
+      "id": "checked-evidence",
+      "from": "reconcile-step",
+      "to": "recovery-gate",
+      "label": "Verified evidence",
+      "variant": "security",
+      "role": "main"
+    },
+    {
+      "id": "authorized-attempt",
+      "from": "recovery-gate",
+      "to": "retry-step",
+      "label": "Eligible + authorized",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "recovery-blocked",
+      "from": "recovery-gate",
+      "to": "remain-stopped",
+      "label": "Not authorized",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Recovery is an explicit opt-in",
+      "items": [
+        "Only initially eligible, tool-free model steps can retry.",
+        "Application callbacks must be free of domain effects."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Limits survive restart",
+      "items": [
+        "Attempt and call allowances span recovery attempts.",
+        "Uncertain spending remains reserved until reconciled."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Saved is separate from delivered",
+      "items": [
+        "A saved rejection remains rejected on replay.",
+        "Delivery uses its own authorization and receipts."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Small Hour: ownership and boundaries",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1360,
+      650
+    ],
+    "repository": {
+      "url": "https://github.com/jingyufanclub/small-hour",
+      "revision": "7e8364a5a4cf0a8b2a4f2ba87ffb19c7c5d6bfab"
+    },
+    "legend": {
+      "mode": "hidden"
+    }
+  },
+  "components": [
+    {
+      "id": "application",
+      "type": "backend",
+      "label": "Your application",
+      "sublabel": "Input, context, instructions",
+      "pos": [
+        40,
+        260
+      ],
+      "size": [
+        210,
+        86
+      ],
+      "sources": [
+        {
+          "path": "src/types.ts",
+          "label": "Turn contracts"
+        }
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "Small Hour runtime",
+      "sublabel": "Limits, dispatch, output checks",
+      "pos": [
+        390,
+        260
+      ],
+      "size": [
+        220,
+        86
+      ],
+      "sources": [
+        {
+          "path": "src/runtime.ts",
+          "label": "Execution loop"
+        },
+        {
+          "path": "src/model-calls.ts",
+          "label": "Call admission and accounting"
+        }
+      ]
+    },
+    {
+      "id": "adapter",
+      "type": "backend",
+      "label": "Provider adapter",
+      "sublabel": "Protocol, stop reasons, usage",
+      "pos": [
+        750,
+        260
+      ],
+      "size": [
+        210,
+        86
+      ],
+      "sources": [
+        {
+          "path": "src/providers/anthropic.ts"
+        },
+        {
+          "path": "src/providers/openai.ts"
+        },
+        {
+          "path": "src/providers/openai-compatible.ts"
+        }
+      ]
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "Selected model",
+      "sublabel": "Requests tools or returns output",
+      "pos": [
+        1110,
+        260
+      ],
+      "size": [
+        210,
+        86
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "security",
+      "label": "Application tools",
+      "sublabel": "Validate and authorize effects",
+      "pos": [
+        390,
+        60
+      ],
+      "size": [
+        220,
+        86
+      ],
+      "sources": [
+        {
+          "path": "src/tools/registry.ts",
+          "label": "Tool execution boundary"
+        }
+      ]
+    },
+    {
+      "id": "result",
+      "type": "backend",
+      "label": "Application result",
+      "sublabel": "Save, show or deliver explicitly",
+      "pos": [
+        40,
+        510
+      ],
+      "size": [
+        210,
+        86
+      ],
+      "sources": [
+        {
+          "path": "src/types.ts",
+          "label": "Results and reports"
+        }
+      ]
+    },
+    {
+      "id": "durability",
+      "type": "database",
+      "label": "Optional durability",
+      "sublabel": "Application-supplied SQLite",
+      "tag": "OPT-IN",
+      "pos": [
+        390,
+        510
+      ],
+      "size": [
+        220,
+        86
+      ],
+      "sources": [
+        {
+          "path": "src/durable/sqlite.ts"
+        },
+        {
+          "path": "src/durable/model-steps.ts"
+        },
+        {
+          "path": "src/durable/model-spend.ts"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "start-turn",
+      "from": "application",
+      "to": "runtime",
+      "label": "turn()",
+      "variant": "emphasis"
+    },
+    {
+      "id": "translate-call",
+      "from": "runtime",
+      "to": "adapter",
+      "label": "call / response",
+      "variant": "emphasis"
+    },
+    {
+      "id": "provider-http",
+      "from": "adapter",
+      "to": "model",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch-tools",
+      "from": "runtime",
+      "to": "tools",
+      "label": "checked tool calls",
+      "variant": "security"
+    },
+    {
+      "id": "return-report",
+      "from": "runtime",
+      "to": "result",
+      "label": "result or error + report"
+    },
+    {
+      "id": "save-evidence",
+      "from": "runtime",
+      "to": "durability",
+      "label": "hooks / checkpoints",
+      "variant": "dashed",
+      "labelDy": 95
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Application decisions",
+      "items": [
+        "Defines workflows, permissions and relevant facts.",
+        "Owns storage, interfaces and delivery transports."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Runtime enforcement",
+      "items": [
+        "Bounds attempts, time, tokens and tool results.",
+        "Records usage before tools or another model call."
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Model work",
+      "items": [
+        "Interprets only the supplied context and tools.",
+        "The core keeps no conversation between turns."
+      ]
+    }
+  ]
+}
