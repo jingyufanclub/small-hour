@@ -1,8 +1,8 @@
 {
   "name": "small-hour",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "A TypeScript LLM runtime with tool execution, saved progress, spending controls, and recovery from failures.",
+  "description": "A provider-neutral TypeScript runtime for application-defined LLM workflows, with tool execution, saved progress, spending controls, and recovery from failures.",
   "type": "module",
   "exports": {
     ".": {

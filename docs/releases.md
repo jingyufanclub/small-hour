@@ -1,5 +1,11 @@
 # Releases and upgrades
 
+## 0.3.0
+
+The Anthropic adapter supports explicit adaptive thinking with optional effort. In this mode, `maxTokens` is the total per-call output ceiling, including reasoning. A manual turn-level thinking budget cannot be combined with adaptive mode; the runtime rejects the conflict before context loading, spending admission or provider dispatch. Existing unconfigured and manual-budget requests keep their behavior.
+
+See [providers](providers.md) for configuration and supported-model obligations. Bind thinking mode and effort into the application's workflow revision when persisting model steps. No storage schema changes or backfills are required. Rollback requires retaining handlers for workflows configured with adaptive thinking; an older adapter does not support that setting. Provider protocol behavior is tested with controlled responses; live model quality requires separate evaluation.
+
 ## 0.2.0
 
 This release adds precise provider stop evidence and explicit recovery for unfinished, tool-free model steps. It includes a [runtime overview and diagram](runtime.md).
@@ -10,10 +16,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.2.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.2.0):
+Use the versioned package from the [0.3.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.3.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.2.0/small-hour-0.2.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.3.0/small-hour-0.3.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.
