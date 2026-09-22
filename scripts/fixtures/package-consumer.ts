@@ -6,7 +6,7 @@ import { SqliteModelStepStore, SqliteTaskRunner, type ModelRecoveryContract, typ
   type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow } from "small-hour/durable/sqlite";
 
 const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only", thinking: { type: "adaptive", effort: "medium" } };
-const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only" };
+const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only", reasoningEffort: "max" };
 const compatible: OpenAICompatibleProviderOptions = { model: "fixture", baseURL: "http://fixture.invalid/v1" };
 const providers: ModelProvider[] = [new AnthropicProvider(anthropic), new OpenAIProvider(openai), new OpenAICompatibleProvider(compatible)];
 const runtime = new SmallHourRuntime({ provider: providers[0], persona: new StaticPersonaSource("Use the supplied ID."), memory: new EmptyMemorySource() });

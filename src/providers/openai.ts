@@ -4,7 +4,7 @@ import { array, httpFailureInfo, invalidResponse, isObject, isRetryableHttpError
 export interface OpenAIProviderOptions {
   model: string;
   apiKey?: string;
-  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   fetch?: typeof globalThis.fetch;
 }
 

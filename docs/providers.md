@@ -35,6 +35,8 @@ Native output items preserve reasoning, exact call IDs, and assistant phases wit
 
 Schemas are sent unchanged. Strict schemas must satisfy provider requirements. `maxTokens` becomes `max_output_tokens`, including reasoning. Use `reasoningEffort` on supported models; `thinking.budgetTokens` is rejected before admission because it has no exact equivalent.
 
+For example, `new OpenAIProvider({ model: "gpt-5.6-luna", reasoningEffort: "low" })` uses the existing adapter. [Luna supports](https://developers.openai.com/api/docs/models/gpt-5.6-luna) `none`, `low`, `medium`, `high`, `xhigh` and `max`; `minimal` remains available for other models that support it. Effort guides reasoning rather than capping spending. An exhausted output allowance fails as incomplete; it does not authorize another call automatically. Keep model, effort and pricing in the application's workflow revision. Account access and task quality require live verification with the selected model.
+
 ## Compatible endpoints
 
 Supply an explicit `baseURL`, normally ending in `/v1`; requests target `/chat/completions`. Credentials come only from the explicit `apiKey`. No cloud endpoint, credential, model, or fallback is selected automatically. Model loading and serving remain external.
