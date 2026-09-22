@@ -1,5 +1,11 @@
 # Releases and upgrades
 
+## 0.5.0
+
+Requires Node.js 26.10 or later. The OpenAI Responses adapter uses the official OpenAI SDK, with SDK retries disabled and cancellation controlled by the runtime. Existing provider options, structured-output parsers, tool dispatch, image input and outcome contracts remain available. OpenAI credentials and endpoint selection retain their explicit boundaries.
+
+Upgrade the application's Node runtime and reinstall dependencies before consuming this artifact; native application dependencies may need rebuilding for the new Node major. No storage migration or backfill is required. Existing workflow identities and incomplete-work recovery rules remain unchanged. Retain the prior package pin and compatible application handlers for rollback.
+
 ## 0.4.0
 
 Turns accept ordered text/image blocks through Anthropic and OpenAI Responses. Shared validation rejects malformed, unsupported or oversized images before a model call; explicit input is copied and frozen before context loading. Existing string input keeps its behavior. See [image input](images.md) for the fixed count/byte limits and application obligations.
@@ -24,15 +30,15 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.4.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.4.0):
+Use the versioned package from the [0.5.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.5.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.4.0/small-hour-0.4.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.5.0/small-hour-0.5.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.
 
-Core consumers require Node.js 20.3 or later. The application supplies its synchronous SQLite connection and driver. Development and the built-in SQLite verification require Node.js 22.13 or later. A source checkout or Git submodule still needs `npm ci` and `npm run build`; pin its commit explicitly.
+Consumers and development checks require Node.js 26.10 or later. The application supplies its synchronous SQLite connection and driver. A source checkout or Git submodule still needs `nvm use`, `npm ci` and `npm run build`; pin its commit explicitly.
 
 ## Consumer obligations
 
@@ -47,6 +53,6 @@ Provider mechanics are checked with controlled responses. Live model quality, mo
 
 ## Producing a release
 
-Run `npm run check` and `npm run check:package` on the candidate. The package check starts without `dist`, builds and packs source in temporary storage, installs the tarball into a separate consumer, and verifies public exports plus runtime and SQLite recovery behavior. CI also checks core package consumption on Node.js 20.
+Run `npm run check` and `npm run check:package` on the candidate. The package check starts without `dist`, builds and packs source in temporary storage, installs the tarball into a separate consumer, and verifies public exports plus runtime and SQLite recovery behavior. CI uses the Node.js version pinned in `.nvmrc`.
 
 Use `npm run check:package -- --out-dir /absolute/release-directory` to retain the verified artifact and checksum. Review the version, notes and commit, then tag that exact commit and attach the verified files. Consumers upgrade separately.

@@ -6,7 +6,7 @@
 | `OpenAIProvider` | `small-hour/providers/openai` | OpenAI Responses |
 | `OpenAICompatibleProvider` | `small-hour/providers/openai-compatible` | Chat Completions |
 
-Adapters translate messages, tools, reasoning, stop reasons, and usage. Configure a supported model and trusted endpoint. The runtime owns retries; Anthropic disables SDK retries, including for injected clients. HTTP adapters issue one request per attempt and reject redirects.
+Adapters translate messages, tools, reasoning, stop reasons, and usage. Configure a supported model and trusted endpoint. Anthropic and OpenAI use their official SDKs; the compatibility adapter uses direct HTTP. The runtime owns retries and disables SDK retries, including for injected Anthropic clients. OpenAI and compatibility requests reject redirects.
 
 Anthropic and OpenAI Responses support bounded [image input](images.md); choose a vision-capable model. The compatibility adapter rejects images before admission or HTTP. Image capability is explicit for custom providers; absence does not grant support.
 
@@ -31,13 +31,31 @@ Native signed thinking and other opaque blocks are echoed unchanged within the t
 
 ## OpenAI
 
-Uses [`POST /v1/responses`](https://developers.openai.com/api/docs/guides/function-calling) with `store: false` and `truncation: "disabled"`. It supplies no conversation ID or previous-response lookup. This request setting does not describe every provider retention policy.
+Uses the official `openai` SDK for [`POST /v1/responses`](https://developers.openai.com/api/docs/guides/function-calling) with `store: false` and `truncation: "disabled"`. The endpoint is fixed to `https://api.openai.com/v1`; SDK organization, project, endpoint and logging environment defaults do not override the adapter. Credentials come from `apiKey` or `OPENAI_API_KEY`. It supplies no conversation ID or previous-response lookup. This request setting does not describe every provider retention policy.
 
 Native output items preserve reasoning, exact call IDs, and assistant phases within the tool loop. Commentary-phase text is excluded from final output. Opaque provider history must remain unchanged and cannot be combined with another provider's history; Small Hour does not retain it across turns.
 
 Schemas are sent unchanged. Strict schemas must satisfy provider requirements. `maxTokens` becomes `max_output_tokens`, including reasoning. Use `reasoningEffort` on supported models; `thinking.budgetTokens` is rejected before admission because it has no exact equivalent.
 
 For example, `new OpenAIProvider({ model: "gpt-5.6-luna", reasoningEffort: "low" })` uses the existing adapter. [Luna supports](https://developers.openai.com/api/docs/models/gpt-5.6-luna) `none`, `low`, `medium`, `high`, `xhigh` and `max`; `minimal` remains available for other models that support it. Effort guides reasoning rather than capping spending. An exhausted output allowance fails as incomplete; it does not authorize another call automatically. Keep model, effort and pricing in the application's workflow revision. Account access and task quality require live verification with the selected model.
+
+## Structured validation
+
+The API receives a JSON schema; the runtime checks the terminal outcome, parses JSON and invokes the application's required `structuredOutput.parse` callback. SDK TypeScript types do not validate model output at runtime. OpenAI's [Zod parsing helpers](https://developers.openai.com/api/docs/guides/structured-outputs) combine schema conversion and parsing for direct SDK callers; Small Hour keeps acceptance in the common runtime for every provider.
+
+Applications can use a schema library instead of handwritten field checks. For example, with an application-installed Zod 4 dependency:
+
+```ts
+import { z } from "zod";
+
+const Result = z.strictObject({ selectedId: z.string() });
+const structuredOutput = {
+  schema: z.toJSONSchema(Result),
+  parse: (value: unknown) => Result.parse(value),
+};
+```
+
+Shape validation does not establish that an ID exists, facts are true or an action is authorized. Add those checks in the application parser or effect boundary. Rejected output does not trigger automatic repair calls.
 
 ## Compatible endpoints
 

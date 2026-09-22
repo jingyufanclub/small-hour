@@ -1,6 +1,6 @@
 import { RuntimeError, type AssistantBlock, type TokenUsage } from "../types.js";
 
-class HttpProviderError extends Error {
+export class HttpProviderError extends Error {
   constructor(message: string, readonly status?: number, readonly requestId?: string, readonly transient = false, options?: ErrorOptions) {
     super(message, options);
   }

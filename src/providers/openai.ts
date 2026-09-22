@@ -1,6 +1,7 @@
+import OpenAI from "openai";
 import { RuntimeError, type AssistantBlock, type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse } from "../types.js";
 import { validateImageMessages } from "../input.js";
-import { array, httpFailureInfo, invalidResponse, isObject, isRetryableHttpError, object, opaquePayload, postJson, string, tokenUsage } from "./http.js";
+import { array, HttpProviderError, httpFailureInfo, invalidResponse, isObject, isRetryableHttpError, object, opaquePayload, string, tokenUsage } from "./http.js";
 
 export interface OpenAIProviderOptions {
   model: string;
@@ -82,26 +83,55 @@ function decode(data: Record<string, unknown>, requestId?: string): ProviderResp
 export class OpenAIProvider implements ModelProvider {
   readonly name = "openai";
   readonly capabilities = { tools: true, structuredOutput: true, thinkingBudget: false, images: true };
-  private readonly apiKey: string;
+  private readonly client: OpenAI;
   get model(): string { return this.options.model; }
   constructor(private readonly options: OpenAIProviderOptions) {
     if (!options.model.trim()) throw new TypeError("OpenAI model is required");
-    this.apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? "";
-    if (!this.apiKey.trim()) throw new TypeError("OpenAI apiKey or OPENAI_API_KEY is required");
+    const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? "";
+    if (!apiKey.trim()) throw new TypeError("OpenAI apiKey or OPENAI_API_KEY is required");
+    const send = options.fetch ?? globalThis.fetch;
+    this.client = new OpenAI({ apiKey, adminAPIKey: null, baseURL: "https://api.openai.com/v1", organization: null, project: null,
+      maxRetries: 0, logLevel: "off", fetchOptions: { redirect: "error" },
+      fetch: async (url, init) => {
+        const response = await send(url, init);
+        if (response.ok) return response;
+        // Preserve HTTP status evidence without waiting for an error body.
+        await response.body?.cancel();
+        return new Response(null, { status: response.status, headers: response.headers });
+      },
+      // The runtime deadline is at most Node's timer maximum and aborts this request first.
+      timeout: 2_147_483_647,
+    });
   }
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     validateImageMessages(request.messages, true);
     if (request.thinking) throw new RuntimeError("OpenAI uses reasoningEffort instead of a thinking token budget", "thinking_unsupported");
-    const { data, requestId } = await postJson("https://api.openai.com/v1/responses", {
+    const pending = this.client.responses.create({
       model: this.model, instructions: request.system.map((block) => block.text).join("\n\n"),
-      input: inputItems(request.messages), max_output_tokens: request.maxTokens, store: false, stream: false, truncation: "disabled",
+      input: inputItems(request.messages) as OpenAI.Responses.ResponseInput,
+      max_output_tokens: request.maxTokens, store: false, stream: false, truncation: "disabled",
       ...(this.options.reasoningEffort ? { reasoning: { effort: this.options.reasoningEffort } } : {}),
       ...(request.tools.length ? { tools: request.tools.map((tool) => ({ type: "function", name: tool.name,
         description: tool.description, parameters: tool.inputSchema, strict: tool.strict ?? true,
       })) } : {}),
       ...(request.outputSchema ? { text: { format: { type: "json_schema", name: "small_hour_result", strict: true, schema: request.outputSchema } } } : {}),
-    }, request.signal, this.apiKey, this.options.fetch);
-    try { return decode(data, requestId); } catch (error) { throw invalidResponse(error, requestId); }
+    }, { signal: request.signal, maxRetries: 0 });
+    let response: Response;
+    try { response = await pending.asResponse(); }
+    catch (error) {
+      if (error instanceof OpenAI.APIConnectionError) {
+        throw new HttpProviderError("provider connection failed", undefined, undefined, true, { cause: error });
+      }
+      if (error instanceof OpenAI.APIError && error.status !== undefined) {
+        throw new HttpProviderError(`provider returned HTTP ${error.status}`, error.status,
+          error.requestID ?? error.headers?.get("request-id") ?? undefined,
+          [408, 409, 429].includes(error.status) || error.status >= 500);
+      }
+      throw error;
+    }
+    const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined;
+    try { return decode(object(await pending), requestId); }
+    catch (error) { throw invalidResponse(error, requestId); }
   }
   isRetryable = isRetryableHttpError;
   failureInfo = httpFailureInfo;
