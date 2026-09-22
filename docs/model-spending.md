@@ -6,10 +6,10 @@
 
 Set `modelCalls: store.hooks(policy)`. Both callbacks are synchronous and may read policy from the connection, but cannot open transactions or cause effects.
 
-- `quote(context)` returns `{ scope, limit, amount, pricing }`. Context includes call/agent/turn IDs, provider/model, attempt, hop, input text, and token limits. `amount` reserves this attempt; `limit` caps its complete scope. `pricing` is saved JSON.
+- `quote(context)` returns `{ scope, limit, amount, pricing }`. Context includes call/agent/turn IDs, provider/model, attempt, hop, explicit text/image input, and token limits. `amount` reserves this attempt; `limit` caps its complete scope. `pricing` is saved JSON.
 - `charge(usage, pricing)` computes the charge from complete validated usage and saved pricing. Preserve pricing-version semantics and every billable token category.
 
-Amounts are nonnegative safe integers in an application-defined unit. Quotes must conservatively cover input, output, reasoning, context, and tool results. Underestimated charges are recorded in full, even above a limit, and restrict later admission. There is no built-in rate card, estimator, currency, or calendar.
+Amounts are nonnegative safe integers in an application-defined unit. Quotes must conservatively cover input, output, reasoning, context, image processing, and tool results. Image byte limits are not token or cost estimates; selected memory is not included in the hook's explicit input. Underestimated charges are recorded in full, even above a limit, and restrict later admission. There is no built-in rate card, estimator, currency, or calendar.
 
 Each call uses one stable scope across retries and continuation steps. Scopes are independent; overlapping/hierarchical limits are unavailable. Changed limits affect future admission without erasing prior costs. Authenticate scope selection. Calls made directly by tools or context loaders need separate admission. Avoid charging twice through `usage.record`.
 

@@ -27,7 +27,7 @@ Applications own connection lifetime, durability settings, busy timeout, backup,
 | Tasks | Input, manifest, schedule, claims, lifecycle, and resolution. |
 | Delivery | Attempt IDs and receipt/outcome evidence; payload remains in the task. |
 
-Contracts, input text, tool arguments, generated results, destinations, pricing JSON, and evidence may contain private data. Keep credentials outside instructions, memory, contracts, and tool results. Retrieved memory packets and provider-native history are not automatically copied into durable storage.
+Contracts, input text and image bytes, tool arguments, generated results, destinations, pricing JSON, and evidence may contain private data. Explicit image input is stored when model steps are selected; applications own image disclosure and storage retention. Keep credentials outside instructions, memory, contracts, and tool results. Retrieved memory packets and provider-native history are not automatically copied into durable storage.
 
 Retain participating rows for the duplicate/recovery window. Deleting receipts removes replay protection; deleting spending or changing scopes removes budget history. Keep compatible workflow handlers during upgrades or stop execution during rollback. Adoption must replace the previous effect, retry, accounting, or transport authority for the selected path.
 

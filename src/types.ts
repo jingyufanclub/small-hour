@@ -10,6 +10,21 @@ export interface TextBlock {
   text: string;
 }
 
+export interface ImageBlock {
+  readonly type: "image";
+  readonly mediaType: "image/png" | "image/jpeg" | "image/webp";
+  readonly data: string;
+}
+
+export type InputBlock = Readonly<TextBlock> | ImageBlock;
+export type InputContent = string | readonly InputBlock[];
+
+export const IMAGE_INPUT_LIMITS = Object.freeze({
+  maxImages: 20,
+  maxImageBytes: 3 * 1024 * 1024,
+  maxTotalImageBytes: 12 * 1024 * 1024,
+});
+
 export interface ToolUseBlock {
   type: "tool_use";
   id: string;
@@ -30,10 +45,10 @@ export interface OpaqueProviderBlock {
 }
 
 export type AssistantBlock = TextBlock | ToolUseBlock | OpaqueProviderBlock;
-export type UserBlock = TextBlock | ToolResultBlock;
+export type UserBlock = TextBlock | ImageBlock | ToolResultBlock;
 
 export type ProviderMessage =
-  | { role: "user"; content: string | UserBlock[] }
+  | { role: "user"; content: string | readonly UserBlock[] }
   | { role: "assistant"; content: string | AssistantBlock[] };
 
 export interface ProviderTool {
@@ -80,7 +95,7 @@ export interface ProviderResponse {
 export interface ModelProvider {
   readonly name: string;
   readonly model?: string;
-  readonly capabilities?: { structuredOutput?: boolean; tools?: boolean; thinkingBudget?: boolean };
+  readonly capabilities?: { structuredOutput?: boolean; tools?: boolean; thinkingBudget?: boolean; images?: boolean };
   complete(request: ProviderRequest): Promise<ProviderResponse>;
   isRetryable?(error: unknown): boolean;
   failureInfo?(error: unknown): { status: "rejected" | "unknown"; requestId?: string };
@@ -89,7 +104,7 @@ export interface ModelProvider {
 export interface TurnContext {
   agentId: string;
   turnId: string;
-  input: string;
+  input: InputContent;
   signal: AbortSignal;
 }
 
@@ -171,7 +186,7 @@ export interface TurnObserver {
 
 export interface TurnInputBase {
   agentId: string;
-  input: string;
+  input: InputContent;
   turnId?: string;
   signal?: AbortSignal;
   maxTokens?: number;

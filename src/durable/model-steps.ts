@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 import { checkAbort } from "../deadline.js";
+import { readInputContent } from "../input.js";
 import type { SmallHourRuntime } from "../runtime.js";
 import { RuntimeError, type StructuredTurnInput, type StructuredTurnResult, type TurnInput, type TurnReport, type TurnResult } from "../types.js";
 import { canonicalJson } from "./json.js";
@@ -119,7 +120,7 @@ function definedFields(value: Record<string, unknown>): Record<string, unknown> 
 function turnContract(input: AnyInput): string {
   const { choice, structuredOutput } = input;
   return canonicalJson(definedFields({
-    agentId: input.agentId, input: input.input, turnId: input.turnId, maxTokens: input.maxTokens,
+    agentId: input.agentId, input: readInputContent(input.input), turnId: input.turnId, maxTokens: input.maxTokens,
     thinking: input.thinking ? { budgetTokens: input.thinking.budgetTokens } : undefined,
     allowedTools: input.allowedTools,
     choice: choice ? definedFields({ name: choice.name, description: choice.description,
@@ -400,7 +401,8 @@ export class SqliteModelStepStore {
         report = readReport(storedReport);
         turnId = typeof turn.turnId === "string" ? turn.turnId : row.attempt_id;
       }
-      if (report.agentId !== turn.agentId || report.turnId !== turnId || typeof turn.input !== "string") throw new TypeError("Mismatched turn identity");
+      if (report.agentId !== turn.agentId || report.turnId !== turnId) throw new TypeError("Mismatched turn identity");
+      readInputContent(turn.input);
       let current: ModelStepAttempt, result: SavedTurn | undefined;
       if (row.status === "completed") {
         if (typeof row.result_json !== "string" || row.error_code !== null) throw new TypeError("Missing completion");

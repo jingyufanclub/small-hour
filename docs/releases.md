@@ -1,5 +1,13 @@
 # Releases and upgrades
 
+## 0.4.0
+
+Turns accept ordered text/image blocks through Anthropic and OpenAI Responses. Shared validation rejects malformed, unsupported or oversized images before a model call; explicit input is copied and frozen before context loading. Existing string input keeps its behavior. See [image input](images.md) for the fixed count/byte limits and application obligations.
+
+`TurnContext.input` now has type `InputContent`; callbacks using string methods must narrow it first. Durable model steps save explicit image bytes and order in their existing turn record. No schema migration or backfill runs, but older readers reject array-input rows. Retain compatible workflow handlers or stop affected execution during rollback. Bind memory-image identity and provider settings to workflow revisions.
+
+The OpenAI adapter's public `reasoningEffort` type also accepts `max`, allowing that effort with supported models. Protocol, runtime and recovery behavior are verified with controlled responses. Live model quality and account access require separate verification.
+
 ## 0.3.0
 
 The Anthropic adapter supports explicit adaptive thinking with optional effort. In this mode, `maxTokens` is the total per-call output ceiling, including reasoning. A manual turn-level thinking budget cannot be combined with adaptive mode; the runtime rejects the conflict before context loading, spending admission or provider dispatch. Existing unconfigured and manual-budget requests keep their behavior.
@@ -16,10 +24,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.3.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.3.0):
+Use the versioned package from the [0.4.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.4.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.3.0/small-hour-0.3.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.4.0/small-hour-0.4.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.
@@ -35,7 +43,7 @@ Core consumers require Node.js 20.3 or later. The application supplies its synch
 - Back up durable data before upgrading. Ordinary model rows remain format 1; recovery-enabled rows use format 2 in the existing table. No backfill runs. Older readers reject format 2, and older spending readers can discard new stop evidence when rewriting records. Retain compatible handlers or stop execution during rollback; restoring an older package alone is insufficient after new records exist.
 - Verify the application's actual selection, effect, output and delivery boundaries before rollout. Keep the previous known-good dependency pin and a compatible recovery plan.
 
-Provider mechanics are checked with controlled responses. Live model quality, model-specific capabilities and consumer integrations require separate verification. Streaming, image input and audio input remain unavailable.
+Provider mechanics are checked with controlled responses. Live model quality, model-specific capabilities and consumer integrations require separate verification. Streaming and audio input remain unavailable.
 
 ## Producing a release
 

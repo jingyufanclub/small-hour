@@ -53,6 +53,7 @@ test("each turn uses fresh host memory without inheriting prior tool exchanges",
   const { provider, calls } = scripted([use("lookup"), text("Coat found."), text(), text()]);
   const shared = runtime(provider, {
     memory: { load: async ({ agentId, turnId, input }) => {
+      assert.ok(typeof input === "string");
       loads.push({ agentId, turnId, input });
       return selected;
     } },

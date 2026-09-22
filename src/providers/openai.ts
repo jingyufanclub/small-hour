@@ -1,4 +1,5 @@
 import { RuntimeError, type AssistantBlock, type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse } from "../types.js";
+import { validateImageMessages } from "../input.js";
 import { array, httpFailureInfo, invalidResponse, isObject, isRetryableHttpError, object, opaquePayload, postJson, string, tokenUsage } from "./http.js";
 
 export interface OpenAIProviderOptions {
@@ -8,7 +9,7 @@ export interface OpenAIProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-function inputItems(messages: ProviderMessage[]): unknown[] {
+function inputItems(messages: readonly ProviderMessage[]): unknown[] {
   return messages.flatMap((message): unknown[] => {
     if (typeof message.content === "string") return [{ role: message.role, content: message.content }];
     if (message.role === "assistant") {
@@ -20,9 +21,23 @@ function inputItems(messages: ProviderMessage[]): unknown[] {
         throw new RuntimeError("unsupported provider history", "provider_history_invalid");
       });
     }
-    return message.content.map((block) => block.type === "text"
-      ? { role: "user", content: block.text }
-      : { type: "function_call_output", call_id: block.toolUseId, output: block.content });
+    const items: unknown[] = [];
+    const multimodal = message.content.some(block => block.type === "image");
+    let parts: unknown[] = [];
+    const flush = () => {
+      if (parts.length) { items.push({ role: "user", content: parts }); parts = []; }
+    };
+    for (const block of message.content) {
+      if (block.type === "text" && !multimodal) items.push({ role: "user", content: block.text });
+      else if (block.type === "tool_result") {
+        flush();
+        items.push({ type: "function_call_output", call_id: block.toolUseId, output: block.content });
+      } else parts.push(block.type === "text"
+        ? { type: "input_text", text: block.text }
+        : { type: "input_image", image_url: `data:${block.mediaType};base64,${block.data}` });
+    }
+    flush();
+    return items;
   });
 }
 
@@ -66,7 +81,7 @@ function decode(data: Record<string, unknown>, requestId?: string): ProviderResp
 
 export class OpenAIProvider implements ModelProvider {
   readonly name = "openai";
-  readonly capabilities = { tools: true, structuredOutput: true, thinkingBudget: false };
+  readonly capabilities = { tools: true, structuredOutput: true, thinkingBudget: false, images: true };
   private readonly apiKey: string;
   get model(): string { return this.options.model; }
   constructor(private readonly options: OpenAIProviderOptions) {
@@ -75,6 +90,7 @@ export class OpenAIProvider implements ModelProvider {
     if (!this.apiKey.trim()) throw new TypeError("OpenAI apiKey or OPENAI_API_KEY is required");
   }
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    validateImageMessages(request.messages, true);
     if (request.thinking) throw new RuntimeError("OpenAI uses reasoningEffort instead of a thinking token budget", "thinking_unsupported");
     const { data, requestId } = await postJson("https://api.openai.com/v1/responses", {
       model: this.model, instructions: request.system.map((block) => block.text).join("\n\n"),

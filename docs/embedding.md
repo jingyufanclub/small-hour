@@ -6,6 +6,8 @@
 
 `agentId` is an application-selected partition key. Use it consistently for context, authorization, usage, and effects. Supply a bounded view through `MemorySource.load()`; select relevant facts before encoding or shortening them.
 
+`input` accepts a string or ordered text/image blocks. Explicit input is copied and frozen before loaders run; callbacks receive that selected input. Code using string methods on `context.input` must first narrow with `typeof context.input === "string"`. Selected memory is copied after loading. See [image input](images.md) for provider support, bounds and persistence.
+
 Register tools with `name`, `description`, `inputSchema`, and `execute`. Optional `parse` validates external arguments. Declare `mode: "read" | "write"`; omission defaults to write. `allowedTools` restricts the registry for each turn. Schemas should close object inputs; application validators enforce domain rules.
 
 Tools execute sequentially. By default, validation and read failures become tool-result errors; `toolErrorMode: "throw"` stops on all failures. A write that throws after starting always ends the turn with `tool_outcome_unknown`. Stable application operation IDs must cover duplicates arriving under different provider call IDs.

@@ -8,6 +8,8 @@
 
 Adapters translate messages, tools, reasoning, stop reasons, and usage. Configure a supported model and trusted endpoint. The runtime owns retries; Anthropic disables SDK retries, including for injected clients. HTTP adapters issue one request per attempt and reject redirects.
 
+Anthropic and OpenAI Responses support bounded [image input](images.md); choose a vision-capable model. The compatibility adapter rejects images before admission or HTTP. Image capability is explicit for custom providers; absence does not grant support.
+
 ## Anthropic
 
 Configure the model and credentials. Structured output uses [`output_config.format`](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) with the supplied schema unchanged. Provider schema support and the application parser both apply.

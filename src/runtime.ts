@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { turnDeadline, type TurnDeadline } from "./deadline.js";
+import { readInputContent, validateImageMessages } from "./input.js";
 import type { MemorySource } from "./memory/interface.js";
 import { completeModelCall } from "./model-calls.js";
 import type { PersonaSource } from "./persona/interface.js";
@@ -122,6 +123,9 @@ export class SmallHourRuntime {
     };
     try {
       timeout.check();
+      context.input = readInputContent(input.input);
+      Object.freeze(context);
+      validateImageMessages([{ role: "user", content: context.input }], this.options.provider.capabilities?.images === true);
       if (!input.agentId.trim() || !context.turnId.trim()) throw new TypeError("agentId and turnId are required");
       if (input.maxTokens !== undefined && (!Number.isSafeInteger(input.maxTokens) || input.maxTokens < 1)) throw new TypeError("maxTokens must be a positive integer");
       if (input.thinking && (!Number.isSafeInteger(input.thinking.budgetTokens) || input.thinking.budgetTokens < 1)) throw new TypeError("thinking budget must be a positive integer");
@@ -140,9 +144,10 @@ export class SmallHourRuntime {
       if (tools.length && this.options.provider.capabilities?.tools === false) throw new RuntimeError("provider does not support tools", "tools_unsupported");
       const [persona, memory] = await Promise.all([
         timeout.run(() => this.options.persona.load(context)),
-        timeout.run(() => this.options.memory.load(context)),
+        timeout.run(async () => structuredClone(await this.options.memory.load(context))),
       ]);
-      const messages: ProviderMessage[] = [...memory, { role: "user", content: input.input }];
+      const messages: ProviderMessage[] = [...memory, { role: "user", content: context.input }];
+      validateImageMessages(messages, this.options.provider.capabilities?.images === true);
       let awaitingToolAnswer = false;
 
       for (let hop = 0; hop < this.maxHops; hop++) {
