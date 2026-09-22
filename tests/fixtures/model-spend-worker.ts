@@ -28,4 +28,4 @@ try { await new SmallHourRuntime({
   process.exitCode = 2;
 }
 db.close();
-if (process.connected) process.disconnect();
+if (process.connected && process.disconnect) process.disconnect();

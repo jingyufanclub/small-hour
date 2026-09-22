@@ -19,8 +19,7 @@ try {
     } else throw new Error("Usage: node scripts/check-package.mjs [--core-only] [--out-dir /absolute/path]");
   }
   const [major, minor] = process.versions.node.split(".").map(Number);
-  assert.ok(coreOnly ? major > 20 || (major === 20 && minor >= 3) : major > 22 || (major === 22 && minor >= 13),
-    coreOnly ? "Core package verification requires Node 20.3 or newer" : "Full package verification requires Node 22.13 or newer for SQLite; use --core-only on Node 20");
+  assert.ok(major > 26 || (major === 26 && minor >= 10), "Package verification requires Node 26.10 or newer");
   workspace = mkdtempSync(join(tmpdir(), "small-hour-package-"));
   const stage = join(workspace, "source"), packed = join(workspace, "packed"), consumer = join(workspace, "consumer");
   for (const directory of [stage, packed, consumer]) mkdirSync(directory);

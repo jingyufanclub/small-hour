@@ -1,6 +1,6 @@
 {
   "name": "small-hour",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "A provider-neutral TypeScript runtime for application-defined LLM workflows, with tool execution, saved progress, spending controls, and recovery from failures.",
   "type": "module",
@@ -40,13 +40,14 @@
     "check:package": "node scripts/check-package.mjs"
   },
   "engines": {
-    "node": ">=20.3"
+    "node": ">=26.10.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.100.1"
+    "@anthropic-ai/sdk": "^0.100.1",
+    "openai": "7.22.0"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.2",
     "tsx": "^4.22.3",
     "typescript": "^5.9.3"
   }

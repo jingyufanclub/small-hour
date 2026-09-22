@@ -12,11 +12,11 @@ Small Hour is a provider-neutral TypeScript runtime for application-defined LLM 
 - Execution reports with accepted decisions, usage, tool outcomes, and receipt references.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.4.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.5.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Setup
 
-Requires Node.js 20.3 or later and an ESM consumer. Install the built artifact using the [release and upgrade guide](docs/releases.md), or run `npm ci` and `npm run build` in a source checkout. Package exports resolve to `dist`. Development checks require Node.js 22.13 or later.
+Requires Node.js 26.10 or later and an ESM consumer. Install the built artifact using the [release and upgrade guide](docs/releases.md), or run `nvm use`, `npm ci` and `npm run build` in a source checkout. Package exports resolve to `dist`; `.nvmrc` selects the development and CI version.
 
 1. Configure a [provider](docs/providers.md) with its model, endpoint, and credentials.
 2. Construct `SmallHourRuntime` with `provider`, `persona`, and `memory`. `StaticPersonaSource` and `EmptyMemorySource` supply static instructions and empty context.
