@@ -2,6 +2,12 @@
 
 Small Hour is a provider-neutral TypeScript runtime for application-defined LLM workflows, with tool execution, saved progress, spending controls, and recovery from failures.
 
+It runs inside your application. You supply the request, instructions, relevant context, and tools or an output schema. Small Hour manages the model calls and execution checks, then returns a result and report. Your application decides what to save, show or deliver.
+
+![Small Hour connects an application to its selected model, dispatches application tools and optionally records durable evidence.](docs/diagrams/architecture.png)
+
+Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool exchange, and recovery after interrupted work.
+
 ## Capabilities
 
 - Anthropic, OpenAI Responses, and OpenAI-compatible Chat Completions adapters.
