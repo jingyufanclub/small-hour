@@ -94,6 +94,7 @@ test("malformed image content fails before context loading, admission, or effect
     "sparse blocks": new Array(1),
     "unsupported MIME": [{ ...image(), mediaType: "image/gif" }],
     "MIME signature mismatch": [image(jpeg)],
+    "non-ASCII WebP signature": [image(Buffer.from([0xd2, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0xd7, 0x45, 0x42, 0x50]).toString("base64"), "image/webp")],
     "invalid signature": [image(Buffer.from("This is not an image.").toString("base64"))],
     "empty payload": [image("")],
     "invalid base64": [image("!not-base64!")],

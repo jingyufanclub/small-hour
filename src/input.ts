@@ -29,7 +29,7 @@ function imageBytes(value: Record<string, unknown>): number {
   const header = Buffer.from(data.slice(0, 24), "base64");
   const matches = mediaType === "image/png" ? header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     : mediaType === "image/jpeg" ? header.subarray(0, 3).equals(Buffer.from([255, 216, 255]))
-      : header.subarray(0, 4).toString("ascii") === "RIFF" && header.subarray(8, 12).toString("ascii") === "WEBP";
+      : header.subarray(0, 4).equals(Buffer.from("RIFF")) && header.subarray(8, 12).equals(Buffer.from("WEBP"));
   if (!matches) return invalid();
   return bytes;
 }
