@@ -4,8 +4,6 @@ Small Hour runs a bounded exchange between an application and a language model. 
 
 ## Who owns what
 
-![Architecture: the application calls Small Hour, which uses a provider adapter, dispatches checked tool calls and returns a result or error with a report. Optional hooks and checkpoints save evidence. Responsibilities are described below.](diagrams/architecture.png)
-
 | Owner | Responsibility |
 | --- | --- |
 | Application | Defines workflows, selects facts and instructions, authorizes actions, implements tools, and decides what to save or show. |
@@ -16,7 +14,30 @@ A **provider adapter** translates this common contract into the selected service
 
 ## One turn, step by step
 
-![Sequence: application input and fresh context reach the model; a tool request is checked and executed; its result returns to the model; final output is checked and returned to the application. The numbered list explains each boundary.](diagrams/turn.png)
+```mermaid
+sequenceDiagram
+    accTitle: One turn with a tool call
+    accDescr: The application supplies input and fresh context. Small Hour admits each model call and records usage before continuing. The application tool authorizes its effect. Small Hour returns the tool result to the model with its original call ID, then checks the final output.
+    participant app as Application
+    participant runtime as Small Hour
+    participant provider as Model provider
+    participant tool as Application tool
+    app->>runtime: turn({ agentId, input })
+    runtime->>app: Load instructions and selected memory
+    app-->>runtime: Fresh context
+    runtime->>runtime: Check limits and admit call
+    runtime->>provider: Input, context and tool schemas
+    provider-->>runtime: Tool request, call ID and usage
+    runtime->>runtime: Record usage and check tool request
+    runtime->>tool: Execute checked arguments
+    tool->>tool: Authorize and perform the effect
+    tool-->>runtime: Tool result
+    runtime->>runtime: Check limits and admit next call
+    runtime->>provider: Tool result with original call ID
+    provider-->>runtime: Final output, stop reason and usage
+    runtime->>runtime: Record usage and check final output
+    runtime-->>app: Result and execution report
+```
 
 1. The application calls `turn()`. Small Hour copies the input and loads fresh instructions and selected memory from application sources.
 2. Small Hour checks remaining call capacity and runs any admission hook before contacting the provider. Optional spending hooks reserve the application's estimated cost.
@@ -49,7 +70,17 @@ See [execution limits](execution.md) and [provider token semantics](providers.md
 
 Durability is optional and uses the application's SQLite connection. A **checkpoint** saves progress so a later process can inspect it. **Replay** returns a committed result without repeating the work. **Reconciliation** means checking authoritative records to establish what actually happened.
 
-![Recovery: completed model steps reuse their saved result. Started or failed steps require inspection and an explicit application decision. Only eligible, authorized work gets another bounded attempt; otherwise it remains unresolved.](diagrams/recovery.png)
+```mermaid
+flowchart TD
+    accTitle: Model-step replay and recovery
+    accDescr: A completed step reuses its saved result without model or tool calls. Started or failed work requires application reconciliation. Only eligible work with explicit authorization against the inspected checkpoint can begin another bounded attempt.
+    inspect["Inspect the saved step"] --> state{"Stored state"}
+    state -->|Completed| replay["Reuse the saved result"]
+    state -->|Started or failed| reconcile["Application checks effects and spending"]
+    reconcile --> decision{"Eligible and explicitly authorized?"}
+    decision -->|Yes, exact checkpoint| retry["Another bounded attempt"]
+    decision -->|No| unresolved["Keep unresolved"]
+```
 
 [Local-operation receipts](local-operations.md) commit local database effects and results together. [Model-step checkpoints](model-steps.md) save explicit input, configuration, reports and completed results. They do not automatically copy retrieved memory or provider-native conversation history. Explicit image input is saved when model steps are selected.
 
@@ -65,5 +96,3 @@ The optional [task runner](tasks.md) executes application-defined steps and [dis
 | Output accepted | The configured output policy or parser accepted it. |
 | Work saved | A committed application write or durable-store record. |
 | Output delivered | Transport evidence; provider acceptance and device or user receipt remain distinct. |
-
-The diagrams describe library responsibilities, not a deployment topology. Their [editable sources and export instructions](diagrams/README.md) live alongside the images.
