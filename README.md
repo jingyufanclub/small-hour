@@ -4,7 +4,15 @@ Small Hour is a provider-neutral TypeScript runtime for application-defined LLM 
 
 It runs inside your application. You supply the request, instructions, relevant context, and tools or an output schema. Small Hour manages the model calls and execution checks, then returns a result and report. Your application decides what to save, show or deliver.
 
-![Small Hour connects an application to its selected model, dispatches application tools and optionally records durable evidence.](docs/diagrams/architecture.png)
+```mermaid
+flowchart LR
+    accTitle: Small Hour ownership
+    accDescr: The application calls Small Hour and receives a result or error with a report. Small Hour calls the selected provider, dispatches application tools, and optionally records durable evidence in application-owned SQLite.
+    app["Application"] <-->|Request / result| runtime["Small Hour"]
+    runtime <-->|Model calls| provider["Selected provider and model"]
+    runtime <-->|Tool dispatch| tools["Application tools"]
+    runtime -.->|Optional durability| store[("Application SQLite")]
+```
 
 Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool exchange, and recovery after interrupted work.
 
