@@ -52,6 +52,7 @@ Provider retries are owned by the runtime; SDK retries are disabled. The optiona
 | Area | Contract |
 | --- | --- |
 | Runtime overview and ownership | [How a turn works](docs/runtime.md) |
+| Pattern selection and validation ownership | [Architecture decisions](docs/architecture.md) |
 | Turns, tools, choices, results | [Embedding](docs/embedding.md) |
 | Limits, accounting, cancellation | [Execution](docs/execution.md) |
 | Trace identity, content capture and destinations | [Tracing](docs/tracing.md) |
