@@ -16,3 +16,4 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run check:package
+      - run: node scripts/check-released-consumer.mjs
