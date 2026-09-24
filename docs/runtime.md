@@ -66,6 +66,8 @@ Tools need capacity for a following model call. A write that fails after startin
 
 See [execution limits](execution.md) and [provider token semantics](providers.md) for defaults and exact behavior.
 
+Optional [tracing](tracing.md) connects model attempts, tool calls and output checks under one trace ID. Content capture is explicit; applications supply the sink and control retention and access. Traces observe execution and do not authorize retries or effects.
+
 ## Saved work and recovery
 
 Durability is optional and uses the application's SQLite connection. A **checkpoint** saves progress so a later process can inspect it. **Replay** returns a committed result without repeating the work. **Reconciliation** means checking authoritative records to establish what actually happened.

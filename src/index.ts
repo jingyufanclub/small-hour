@@ -6,3 +6,4 @@ export { AcceptAllOutput, MaxLengthOutput, type OutputPolicy, type OutputPolicyR
 export { defaultRetryPolicy, withRetry, type RetryPolicy } from "./retry.js";
 export { NoopUsageSink, type UsageSink } from "./usage.js";
 export * from "./types.js";
+export type { TraceInput, TraceContext, TraceSummary, TraceContent, TraceEvent, TraceSink, TracingOptions, ProviderTraceObserver } from "./tracing.js";

@@ -103,7 +103,7 @@ export class AnthropicProvider implements ModelProvider {
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     validateImageMessages(request.messages, true);
     if (this.thinking && request.thinking) throw new RuntimeError("adaptive thinking cannot use a manual thinking budget", "thinking_unsupported");
-    const message = await this.client.messages.create({
+    const body: Anthropic.MessageCreateParamsNonStreaming = {
       model: this.options.model,
       max_tokens: request.maxTokens + (request.thinking?.budgetTokens ?? 0),
       system: anthropicSystem(request.system),
@@ -122,7 +122,10 @@ export class AnthropicProvider implements ModelProvider {
         ...(request.outputSchema ? { format: { type: "json_schema" as const, schema: request.outputSchema } } : {}),
       } } : {}),
       messages: anthropicMessages(request.messages),
-    }, { signal: request.signal, maxRetries: 0 });
+    };
+    request.trace?.request(body);
+    const message = await this.client.messages.create(body, { signal: request.signal, maxRetries: 0 });
+    request.trace?.response(message);
 
     return {
       content: genericContent(message.content),

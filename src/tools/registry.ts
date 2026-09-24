@@ -56,7 +56,7 @@ export class ToolRegistry {
     return definition.mode ?? "write";
   }
 
-  async execute(name: string, input: unknown, context: ToolContext, onStart?: () => void | Promise<void>): Promise<unknown> {
+  async execute(name: string, input: unknown, context: ToolContext, onStart?: () => void | Promise<void>, onExecute?: (parsed: unknown) => void): Promise<unknown> {
     checkAbort(context.signal);
     const definition = this.definitions.get(name);
     if (!definition) throw new Error(`unknown tool: ${name}`);
@@ -64,6 +64,7 @@ export class ToolRegistry {
     checkAbort(context.signal);
     await onStart?.();
     checkAbort(context.signal);
+    onExecute?.(parsed);
     return await definition.execute(parsed, context);
   }
 }

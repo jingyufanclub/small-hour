@@ -24,9 +24,10 @@ Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool 
 - Sequential tools, per-turn allowlists, validated choices, and structured results.
 - Bounded model calls, retries, deadlines, tokens, and tool results.
 - Execution reports with accepted decisions, usage, tool outcomes, and receipt references.
+- Optional correlated traces with explicit content capture and an application-supplied sink.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.5.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.6.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Setup
 
@@ -53,6 +54,7 @@ Provider retries are owned by the runtime; SDK retries are disabled. The optiona
 | Runtime overview and ownership | [How a turn works](docs/runtime.md) |
 | Turns, tools, choices, results | [Embedding](docs/embedding.md) |
 | Limits, accounting, cancellation | [Execution](docs/execution.md) |
+| Trace identity, content capture and destinations | [Tracing](docs/tracing.md) |
 | Models and endpoints | [Providers](docs/providers.md) |
 | Image selection, limits and storage | [Image input](docs/images.md) |
 | Atomic local effects | [Local operations](docs/local-operations.md) |

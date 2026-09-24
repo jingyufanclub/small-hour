@@ -1,3 +1,5 @@
+import type { ProviderTraceObserver, TraceContext, TraceInput, TraceSummary } from "./tracing.js";
+
 export type JsonSchema = Record<string, unknown>;
 
 export interface SystemBlock {
@@ -74,6 +76,7 @@ export interface ProviderRequest {
   thinking?: { enabled: true; budgetTokens: number };
   outputSchema?: JsonSchema;
   signal: AbortSignal;
+  trace?: ProviderTraceObserver;
 }
 
 export type ProviderStopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "refusal"
@@ -106,6 +109,7 @@ export interface TurnContext {
   turnId: string;
   input: InputContent;
   signal: AbortSignal;
+  trace?: TraceContext;
 }
 
 export interface ToolContext extends TurnContext {
@@ -137,6 +141,7 @@ interface ModelCallIdentity {
   requestId?: string;
   usage?: TokenUsage;
   accounting: "unrecorded" | "recorded";
+  trace?: TraceContext;
 }
 
 export type ModelCallRecord = ModelCallIdentity & (
@@ -178,6 +183,7 @@ export interface ToolCallRecord {
   status: "not_started" | "completed" | "unknown";
   receiptIds: string[];
   errorCode?: string;
+  trace?: TraceContext;
 }
 
 export interface TurnObserver {
@@ -191,6 +197,7 @@ export interface TurnInputBase {
   signal?: AbortSignal;
   maxTokens?: number;
   thinking?: { budgetTokens: number };
+  trace?: TraceInput;
 }
 
 export interface TurnInput<TChoice = unknown> extends TurnInputBase {
@@ -213,6 +220,7 @@ export interface TurnReport<TChoice = unknown> {
   modelCalls: ModelCallRecord[];
   usage: TokenUsage[];
   hops: number;
+  trace?: TraceSummary;
 }
 
 export interface TurnResult<TChoice = unknown> extends TurnReport<TChoice> {

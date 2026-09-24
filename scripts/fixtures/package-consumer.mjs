@@ -19,6 +19,15 @@ const input = { agentId: "consumer", input: "Select item-7.", allowedTools: [] }
 const answer = value => ({ content: [{ type: "text", text: value }], stopReason: "end_turn" });
 const create = provider => new SmallHourRuntime({ provider, persona: new StaticPersonaSource("Use the supplied ID."),
   memory: new EmptyMemorySource(), retry: { attempts: 1 } });
+const traceEvents = [];
+const traced = new SmallHourRuntime({ provider: { name: "fixture", async complete() { return answer("traced answer"); } },
+  persona: new StaticPersonaSource("Use supplied facts."), memory: new EmptyMemorySource(),
+  tracing: { sink: { record: event => { traceEvents.push(event); } }, content: { maxBytes: 1000 } } });
+const tracedResult = await traced.turn({ ...input, trace: { traceId: "a".repeat(32) } });
+assert.equal(tracedResult.trace.traceId, "a".repeat(32));
+assert.equal(traceEvents.at(-1).type, "turn.finished");
+assert.equal(traceEvents.at(-1).content.value.output, "traced answer");
+assert.ok(traceEvents.every(event => event.traceId === tracedResult.trace.traceId));
 let calls = 0;
 const plain = create({ name: "fixture", async complete(request) {
   calls++; assert.deepEqual(request.tools, []); assert.equal(request.system[0].text, "Use the supplied ID.");

@@ -74,14 +74,17 @@ export class OpenAICompatibleProvider implements ModelProvider {
     if (request.thinking) throw new RuntimeError("compatible provider does not support a thinking token budget", "thinking_unsupported");
     if (request.tools.length && !this.capabilities.tools) throw new RuntimeError("tool support must be enabled for this model and server", "tools_unsupported");
     if (request.outputSchema && !this.capabilities.structuredOutput) throw new RuntimeError("structured output support must be enabled for this model and server", "structured_output_unsupported");
-    const { data, requestId } = await postJson(this.url, {
+    const body = {
       model: this.model, messages: [{ role: "system", content: request.system.map((block) => block.text).join("\n\n") }, ...chatMessages(request.messages)],
       max_tokens: request.maxTokens, stream: false,
       ...(request.tools.length ? { tools: request.tools.map((tool) => ({ type: "function", function: {
         name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: tool.strict ?? true,
       } })) } : {}),
       ...(request.outputSchema ? { response_format: { type: "json_schema", json_schema: { name: "small_hour_result", strict: true, schema: request.outputSchema } } } : {}),
-    }, request.signal, this.options.apiKey, this.options.fetch);
+    };
+    request.trace?.request(body);
+    const { data, requestId } = await postJson(this.url, body, request.signal, this.options.apiKey, this.options.fetch);
+    request.trace?.response(data);
     try { return decode(data, requestId); } catch (error) { throw invalidResponse(error, requestId); }
   }
   isRetryable = isRetryableHttpError;

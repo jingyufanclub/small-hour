@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 import { checkAbort } from "../deadline.js";
 import { readInputContent } from "../input.js";
+import { readTraceInput } from "../tracing.js";
 import type { SmallHourRuntime } from "../runtime.js";
 import { RuntimeError, type StructuredTurnInput, type StructuredTurnResult, type TurnInput, type TurnReport, type TurnResult } from "../types.js";
 import { canonicalJson } from "./json.js";
@@ -106,6 +107,7 @@ function prepare(input: AnyInput) {
     throw new ModelStepError("invalid_request", "The model step turn needs JSON configuration.", { cause });
   }
   const selected = JSON.parse(contract) as AnyInput;
+  if (input.trace !== undefined) selected.trace = readTraceInput(input.trace);
   selected.signal = input.signal;
   if (input.choice) selected.choice = { ...selected.choice!, parse: input.choice.parse,
     authorizeWrite: input.choice.authorizeWrite, onChoice: input.choice.onChoice };
