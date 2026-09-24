@@ -4,9 +4,10 @@ import { readInputContent, validateImageMessages } from "./input.js";
 import type { MemorySource } from "./memory/interface.js";
 import { completeModelCall } from "./model-calls.js";
 import type { PersonaSource } from "./persona/interface.js";
-import { AcceptAllOutput, type OutputPolicy } from "./policy/output.js";
+import { AcceptAllOutput, type OutputPolicy, type OutputPolicyResult } from "./policy/output.js";
 import { defaultRetryPolicy, type RetryPolicy } from "./retry.js";
 import { ToolRegistry } from "./tools/registry.js";
+import { readTraceInput, readTracingOptions, TurnTrace, type TraceSpan, type TracingOptions } from "./tracing.js";
 import {
   RuntimeError, type AssistantBlock, type ModelCallHooks, type ModelProvider, type ProviderMessage,
   type StructuredTurnInput, type StructuredTurnResult, type SystemBlock, type ToolCallRecord,
@@ -32,6 +33,7 @@ export interface RuntimeOptions {
   toolResultOverflow?: (value: unknown, context: ToolResultOverflowContext) => unknown | Promise<unknown>;
   toolErrorMode?: "result" | "throw";
   cachePersona?: boolean;
+  tracing?: TracingOptions;
 }
 
 function systemBlocks(persona: string | SystemBlock[], cachePersona: boolean): SystemBlock[] {
@@ -70,6 +72,7 @@ export class SmallHourRuntime {
   private readonly maxModelCalls: number;
   private readonly maxTokens: number;
   private readonly maxToolResultCharacters: number;
+  private readonly tracing?: TracingOptions;
 
   constructor(private readonly options: RuntimeOptions) {
     this.tools = options.tools ?? new ToolRegistry();
@@ -81,6 +84,7 @@ export class SmallHourRuntime {
     this.maxModelCalls = options.maxModelCalls ?? this.maxHops * this.retry.attempts;
     this.maxTokens = options.maxTokens ?? 512;
     this.maxToolResultCharacters = options.maxToolResultCharacters ?? 4_000;
+    this.tracing = readTracingOptions(options.tracing);
     const limits = [this.timeoutMs, this.maxHops, this.maxModelCalls, this.maxTokens, this.retry.attempts];
     if (limits.some((limit) => !Number.isSafeInteger(limit) || limit < 1) || this.timeoutMs > 2_147_483_647
       || !Number.isSafeInteger(this.maxToolResultCharacters) || this.maxToolResultCharacters < 80) {
@@ -88,8 +92,15 @@ export class SmallHourRuntime {
     }
   }
 
-  private async toolResult(value: unknown, call: ToolCallRecord, context: TurnContext, deadline: TurnDeadline): Promise<string> {
-    let content = serialize(value);
+  private async toolResult(value: unknown, call: ToolCallRecord, context: TurnContext, deadline: TurnDeadline,
+    trace?: TurnTrace, span?: TraceSpan): Promise<string> {
+    let content: string;
+    try { content = serialize(value); }
+    catch (error) {
+      if (span) trace?.emit(span, { type: "tool.result", toolCallId: call.id, stage: "original" }, () => { throw error; });
+      throw error;
+    }
+    if (span) trace?.emit(span, { type: "tool.result", toolCallId: call.id, stage: "original" }, () => JSON.parse(content));
     if (content.length > this.maxToolResultCharacters && this.options.toolResultOverflow) {
       const compact = await deadline.run(() => this.options.toolResultOverflow!(value, {
         ...context, toolCallId: call.id, toolName: call.name, maxCharacters: this.maxToolResultCharacters,
@@ -98,17 +109,39 @@ export class SmallHourRuntime {
     }
     if (content.length > this.maxToolResultCharacters) throw new RuntimeError("tool result exceeds the configured limit", "tool_result_too_large");
     deadline.check();
+    if (span) trace?.emit(span, { type: "tool.result", toolCallId: call.id, stage: "model" }, () => content);
     return content;
   }
 
   async turn<TValue>(input: StructuredTurnInput<TValue>, observer?: TurnObserver): Promise<StructuredTurnResult<TValue>>;
   async turn<TChoice = unknown>(input: TurnInput<TChoice>, observer?: TurnObserver): Promise<TurnResult<TChoice>>;
   async turn<TChoice, TValue>(input: TurnInput<TChoice> | StructuredTurnInput<TValue>, observer?: TurnObserver): Promise<TurnResult<TChoice> | StructuredTurnResult<TValue>> {
+    const traceInput = input.trace === undefined ? undefined : readTraceInput(input.trace);
     const timeout = turnDeadline(input.signal, this.timeoutMs);
     const context: TurnContext = { agentId: input.agentId, turnId: input.turnId ?? randomUUID(), input: input.input, signal: timeout.signal };
+    const trace = this.tracing ? new TurnTrace(this.tracing, { agentId: context.agentId, turnId: context.turnId }, traceInput) : undefined;
+    if (trace) context.trace = trace.root.context;
     const report: TurnReport<TChoice> = { agentId: context.agentId, turnId: context.turnId, toolCalls: [], modelCalls: [], usage: [], hops: 0 };
+    const toolSpans = new Map<string, TraceSpan>();
+    const updateTrace = () => { if (trace) report.trace = trace.summary(); };
+    const finishTool = (call: ToolCallRecord) => {
+      const span = toolSpans.get(call.id);
+      if (!span || !trace || span.closed) return;
+      const { input: _, ...record } = call;
+      trace.emit(span, { type: "tool.finished", record, durationMs: trace.duration(span) });
+      span.closed = true;
+    };
+    const finish = (result: TurnResult<TChoice> | StructuredTurnResult<TValue>) => {
+      if (!trace) return result;
+      report.toolCalls.forEach(finishTool);
+      trace.emit(trace.root, { type: "turn.finished", status: result.status, durationMs: trace.duration(trace.root) },
+        () => ({ output: result.output, issues: result.issues, ...(result.status === "structured" ? { value: result.value } : {}) }));
+      trace.close(); updateTrace();
+      return { ...result, trace: trace.summary() };
+    };
     const { signal } = context;
     const checkpoint = async () => {
+      updateTrace();
       if (!observer) return;
       try { await timeout.run(() => observer.checkpoint(structuredClone(report))); }
       catch (cause) {
@@ -122,6 +155,8 @@ export class SmallHourRuntime {
       catch (cause) { call.status = "not_started"; throw cause; }
     };
     try {
+      if (trace) trace.emit(trace.root, { type: "turn.started" }, () => context.input);
+      updateTrace();
       timeout.check();
       context.input = readInputContent(input.input);
       Object.freeze(context);
@@ -159,7 +194,8 @@ export class SmallHourRuntime {
           maxTokens: input.maxTokens ?? this.maxTokens,
           ...(input.thinking ? { thinking: { enabled: true as const, budgetTokens: input.thinking.budgetTokens } } : {}),
           ...(input.structuredOutput ? { outputSchema: input.structuredOutput.schema } : {}), signal,
-        }, context, report, { retry: this.retry, maxModelCalls: this.maxModelCalls, hooks: this.options.modelCalls, deadline: timeout, checkpoint: observer ? checkpoint : undefined });
+        }, context, report, { retry: this.retry, maxModelCalls: this.maxModelCalls, hooks: this.options.modelCalls, deadline: timeout,
+          checkpoint: observer ? checkpoint : undefined, trace });
         if (response.usage) await timeout.run(() => this.usage.record(response.usage!, context));
         const said = textFrom(response.content);
         const requested = response.content.filter((block): block is Extract<AssistantBlock, { type: "tool_use" }> => block.type === "tool_use");
@@ -173,6 +209,11 @@ export class SmallHourRuntime {
         const pending: ToolCallRecord[] = requested.map((request) => ({
           id: request.id, name: request.name, input: structuredClone(request.input), ok: false, status: "not_started", receiptIds: [],
         }));
+        if (trace) for (const call of pending) {
+          const span = trace.child(report.modelCalls.at(-1)?.trace?.spanId);
+          toolSpans.set(call.id, span); call.trace = span.context;
+          trace.emit(span, { type: "tool.requested", toolCallId: call.id, toolName: call.name }, () => call.input);
+        }
         report.toolCalls.push(...pending);
         if (pending.length) await checkpoint();
         if (response.stopReason === "refusal") throw new RuntimeError("provider refused the request", "provider_refused");
@@ -183,20 +224,35 @@ export class SmallHourRuntime {
           if (response.stopReason !== "end_turn" && response.stopReason !== "stop_sequence") throw new RuntimeError(`provider stopped before completing the turn: ${response.stopReason}`, "incomplete_stop");
           if (input.structuredOutput) {
             let value: TValue;
-            try { value = await timeout.run(() => input.structuredOutput!.parse(JSON.parse(said))); }
+            const span = trace?.child();
+            if (span) trace?.emit(span, { type: "check.started", check: "structured_output" }, () => said);
+            try {
+              value = await timeout.run(() => input.structuredOutput!.parse(JSON.parse(said)));
+              if (span) trace?.emit(span, { type: "check.finished", check: "structured_output", verdict: "accepted", durationMs: trace.duration(span) }, () => value);
+            }
             catch (error) {
+              if (span) trace?.emit(span, { type: "check.finished", check: "structured_output", verdict: signal.aborted ? "unavailable" : "rejected", durationMs: trace.duration(span) });
               timeout.check();
               throw new RuntimeError("structured output failed validation", "structured_output_invalid", { cause: error });
             }
-            return { ...snapshot(report), choice: undefined, status: "structured", value, output: said, accepted: true, issues: [], finishReason: response.stopReason };
+            return finish({ ...snapshot(report), choice: undefined, status: "structured", value, output: said, accepted: true, issues: [], finishReason: response.stopReason });
           }
           if (input.choice && (input.choice.required ?? true) && report.choice === undefined) throw new RuntimeError(`turn ended without required choice ${choiceName}`, "choice_required");
           if (awaitingToolAnswer && !said && report.choice === undefined) throw new RuntimeError("provider ended without answering after a tool result", "missing_tool_answer");
-          const policy = await timeout.run(() => this.outputPolicy.apply(said, context));
-          return {
+          const span = trace?.child();
+          if (span) trace?.emit(span, { type: "check.started", check: "output" }, () => said);
+          let policy: OutputPolicyResult;
+          try {
+            policy = await timeout.run(() => this.outputPolicy.apply(said, context));
+            if (span) trace?.emit(span, { type: "check.finished", check: "output", verdict: policy.accepted ? "accepted" : "rejected", durationMs: trace.duration(span) }, () => policy);
+          } catch (error) {
+            if (span) trace?.emit(span, { type: "check.finished", check: "output", verdict: "unavailable", durationMs: trace.duration(span) });
+            throw error;
+          }
+          return finish({
             ...snapshot(report), status: policy.accepted ? (policy.output ? "reply" : "silence") : "rejected",
             output: policy.output, accepted: policy.accepted, issues: policy.issues ?? [], finishReason: response.stopReason,
-          };
+          });
         }
         if (!requested.length) throw new RuntimeError("provider stopped for tool use without a tool call", "missing_tool_call");
         if (hop + 1 >= this.maxHops) throw new RuntimeError("tool hop limit reached before executing another tool", "tool_hop_limit");
@@ -207,64 +263,77 @@ export class SmallHourRuntime {
         for (const [index, request] of requested.entries()) {
           timeout.check();
           const call = pending[index];
-          let value: unknown;
-          let mode: "read" | "write" = "write";
+          const span = toolSpans.get(call.id);
           try {
-            if (!allowed.has(request.name)) throw new RuntimeError(`tool is not allowed in this turn: ${request.name}`, "tool_not_allowed");
-            if (request.name === choiceName && input.choice) {
-              if (report.choice !== undefined) throw new RuntimeError("choice already made", "choice_already_made");
-              value = await timeout.run(() => input.choice!.parse ? input.choice!.parse(request.input) : request.input as TChoice);
-              if (value === undefined) throw new RuntimeError("choice cannot be undefined", "choice_invalid");
-              report.choice = structuredClone(value as TChoice);
-              await checkpoint();
-              if (input.choice.onChoice) {
-                await checkpointToolStart(call);
-                await timeout.run(() => input.choice!.onChoice!(structuredClone(report.choice!), context));
-              }
-              value = { ok: true, chosen: structuredClone(report.choice) };
-            } else {
-              mode = this.tools.mode(request.name);
-              if (input.choice && mode === "write") {
-                if (report.choice === undefined && input.choice.requiredFirst) throw new RuntimeError(`write tool ${request.name} requires ${choiceName} first`, "choice_required_before_write");
-                if (report.choice !== undefined) {
-                  const authorized = await timeout.run(() => input.choice!.authorizeWrite?.(structuredClone(report.choice!), { name: request.name, input: request.input }, context) ?? false);
-                  if (authorized !== true) throw new RuntimeError(`choice did not authorize write tool ${request.name}`, "choice_write_not_authorized");
+            let value: unknown;
+            let mode: "read" | "write" = "write";
+            try {
+              if (!allowed.has(request.name)) throw new RuntimeError(`tool is not allowed in this turn: ${request.name}`, "tool_not_allowed");
+              if (request.name === choiceName && input.choice) {
+                if (report.choice !== undefined) throw new RuntimeError("choice already made", "choice_already_made");
+                value = await timeout.run(() => input.choice!.parse ? input.choice!.parse(request.input) : request.input as TChoice);
+                if (value === undefined) throw new RuntimeError("choice cannot be undefined", "choice_invalid");
+                report.choice = structuredClone(value as TChoice);
+                await checkpoint();
+                if (input.choice.onChoice) {
+                  await checkpointToolStart(call);
+                  if (span) trace?.emit(span, { type: "tool.started", toolCallId: call.id, toolName: call.name }, () => report.choice);
+                  await timeout.run(() => input.choice!.onChoice!(structuredClone(report.choice!), context));
                 }
+                value = { ok: true, chosen: structuredClone(report.choice) };
+              } else {
+                mode = this.tools.mode(request.name);
+                if (input.choice && mode === "write") {
+                  if (report.choice === undefined && input.choice.requiredFirst) throw new RuntimeError(`write tool ${request.name} requires ${choiceName} first`, "choice_required_before_write");
+                  if (report.choice !== undefined) {
+                    const authorized = await timeout.run(() => input.choice!.authorizeWrite?.(structuredClone(report.choice!), { name: request.name, input: request.input }, context) ?? false);
+                    if (authorized !== true) throw new RuntimeError(`choice did not authorize write tool ${request.name}`, "choice_write_not_authorized");
+                  }
+                }
+                value = await timeout.run(() => this.tools.execute(request.name, request.input, {
+                  ...context, toolCallId: request.id,
+                  ...(span ? { trace: span.context } : {}),
+                  recordReceipt: (receiptId) => {
+                    if (typeof receiptId !== "string" || !receiptId.trim()) throw new TypeError("receiptId must be a nonempty string");
+                    call.receiptIds.push(receiptId);
+                  },
+                }, () => { timeout.check(); return checkpointToolStart(call); }, span && trace ? parsed => {
+                  trace.emit(span, { type: "tool.started", toolCallId: call.id, toolName: call.name }, () => parsed);
+                  timeout.check();
+                } : undefined));
               }
-              value = await timeout.run(() => this.tools.execute(request.name, request.input, {
-                ...context, toolCallId: request.id,
-                recordReceipt: (receiptId) => {
-                  if (typeof receiptId !== "string" || !receiptId.trim()) throw new TypeError("receiptId must be a nonempty string");
-                  call.receiptIds.push(receiptId);
-                },
-              }, () => { timeout.check(); return checkpointToolStart(call); }));
+              call.status = "completed";
+              call.ok = true;
+              await checkpoint();
+            } catch (error) {
+              timeout.check();
+              if (error instanceof RuntimeError && error.code === "checkpoint_failed") throw error;
+              call.errorCode = error instanceof RuntimeError ? error.code : "tool_failed";
+              if (call.status === "unknown" && mode === "write") throw new RuntimeError(`tool ${request.name} may have caused effects`, "tool_outcome_unknown", { cause: error });
+              if ((request.name === choiceName && report.choice !== undefined) || this.options.toolErrorMode === "throw") throw new RuntimeError(`tool ${request.name} failed`, "tool_failed", { cause: error });
+              results.push({ type: "tool_result", toolUseId: request.id, isError: true,
+                content: await this.toolResult({ error: error instanceof Error ? error.message : String(error), code: call.errorCode }, call, context, timeout, trace, span) });
+              continue;
             }
-            call.status = "completed";
-            call.ok = true;
-            await checkpoint();
-          } catch (error) {
-            timeout.check();
-            if (error instanceof RuntimeError && error.code === "checkpoint_failed") throw error;
-            call.errorCode = error instanceof RuntimeError ? error.code : "tool_failed";
-            if (call.status === "unknown" && mode === "write") throw new RuntimeError(`tool ${request.name} may have caused effects`, "tool_outcome_unknown", { cause: error });
-            if ((request.name === choiceName && report.choice !== undefined) || this.options.toolErrorMode === "throw") throw new RuntimeError(`tool ${request.name} failed`, "tool_failed", { cause: error });
-            results.push({ type: "tool_result", toolUseId: request.id, isError: true,
-              content: await this.toolResult({ error: error instanceof Error ? error.message : String(error), code: call.errorCode }, call, context, timeout) });
-            continue;
-          }
-          results.push({ type: "tool_result", toolUseId: request.id, content: await this.toolResult(value, call, context, timeout) });
+            results.push({ type: "tool_result", toolUseId: request.id, content: await this.toolResult(value, call, context, timeout, trace, span) });
+          } finally { finishTool(call); }
         }
         messages.push({ role: "user", content: results });
         awaitingToolAnswer = true;
       }
       throw new RuntimeError("tool hop limit exhausted", "tool_hop_limit");
     } catch (error) {
+      report.toolCalls.forEach(finishTool);
+      if (trace) trace.emit(trace.root, { type: "turn.finished", status: "failed",
+        errorCode: error instanceof RuntimeError ? error.code : "turn_failed", durationMs: trace.duration(trace.root) });
+      trace?.close(); updateTrace();
       throw new RuntimeError(error instanceof Error ? error.message : "turn failed",
         error instanceof RuntimeError ? error.code : "turn_failed", {
           cause: error instanceof RuntimeError ? error.cause ?? error : error,
           report: snapshot(report),
         });
     } finally {
+      trace?.close();
       timeout.dispose();
     }
   }

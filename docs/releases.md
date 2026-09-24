@@ -1,5 +1,13 @@
 # Releases and upgrades
 
+## 0.6.0
+
+Optional [execution tracing](tracing.md) joins turn, model-attempt, tool-call and output-check records with a shared trace ID and distinct spans. Applications supply a synchronous sink, explicitly enable content capture, and choose its byte limit. Built-in adapters expose their effective request and decoded response bodies; transport headers and credentials are excluded. Export or capture failures are reported without retrying effects or overriding execution outcomes.
+
+Existing untraced execution retains its behavior and report shape. Traced SQLite model steps save optional correlation metadata in existing reports; no tables, migrations or backfills are added. Persist and resupply trace IDs when correlating recovery across invocations. Completed replay returns saved evidence without generating new model/tool events.
+
+Keep 0.6-compatible readers for traced records: older versions can reject completed traced records or drop trace metadata when rewriting reports. Disabling tracing does not remove metadata already saved. Retain the previous package pin and compatible readers when planning rollback. Applications own content storage, access, retention, export flushing and downstream delivery evidence.
+
 ## 0.5.0
 
 Requires Node.js 26.10 or later. The OpenAI Responses adapter uses the official OpenAI SDK, with SDK retries disabled and cancellation controlled by the runtime. Existing provider options, structured-output parsers, tool dispatch, image input and outcome contracts remain available. OpenAI credentials and endpoint selection retain their explicit boundaries.
@@ -30,10 +38,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.5.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.5.0):
+Use the versioned package from the [0.6.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.6.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.5.0/small-hour-0.5.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.6.0/small-hour-0.6.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.

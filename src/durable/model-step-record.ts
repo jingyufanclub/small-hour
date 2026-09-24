@@ -1,6 +1,7 @@
 import type { StructuredTurnResult, TurnReport, TurnResult } from "../types.js";
 import { readModelCallStop } from "../model-call-record.js";
 import { canonicalJson } from "./json.js";
+import { readTraceContext, readTraceSummary } from "../tracing.js";
 
 export type SavedTurn = TurnResult | StructuredTurnResult<unknown>;
 
@@ -22,6 +23,7 @@ function usage(value: unknown): void {
 export function readReport(value: unknown): TurnReport {
   const row = object(value);
   requireValue(text(row.agentId) && text(row.turnId) && count(row.hops));
+  const trace = row.trace === undefined ? undefined : readTraceSummary(row.trace);
   const toolIds = new Set<string>(), callIds = new Set<string>();
   for (const item of list(row.toolCalls)) {
     const call = object(item);
@@ -43,12 +45,28 @@ export function readReport(value: unknown): TurnReport {
     readModelCallStop(call);
   }
   list(row.usage).forEach(usage);
+  const models = list(row.modelCalls).map(object), tools = list(row.toolCalls).map(object);
+  if (trace) {
+    const spans = new Set([trace.spanId]), modelSpans = new Set<string>();
+    for (const call of models) {
+      const child = readTraceContext(call.trace);
+      requireValue(child.traceId === trace.traceId && child.parentSpanId === trace.spanId && !spans.has(child.spanId));
+      spans.add(child.spanId); modelSpans.add(child.spanId);
+    }
+    for (const call of tools) {
+      const child = readTraceContext(call.trace);
+      requireValue(child.traceId === trace.traceId && child.parentSpanId !== undefined
+        && modelSpans.has(child.parentSpanId) && !spans.has(child.spanId));
+      spans.add(child.spanId);
+    }
+  } else requireValue([...models, ...tools].every(call => call.trace === undefined));
   return row as unknown as TurnReport;
 }
 
 export function reportValue(report: TurnReport): TurnReport {
   return {
     agentId: report.agentId, turnId: report.turnId, hops: report.hops,
+    ...(report.trace === undefined ? {} : { trace: report.trace }),
     ...(report.choice === undefined ? {} : { choice: report.choice }),
     toolCalls: report.toolCalls.map(({ errorCode, ...call }) => ({ ...call, ...(errorCode === undefined ? {} : { errorCode }) })),
     modelCalls: report.modelCalls.map(({ requestId, usage, ...call }) => ({ ...call,

@@ -106,7 +106,7 @@ export class OpenAIProvider implements ModelProvider {
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     validateImageMessages(request.messages, true);
     if (request.thinking) throw new RuntimeError("OpenAI uses reasoningEffort instead of a thinking token budget", "thinking_unsupported");
-    const pending = this.client.responses.create({
+    const body: OpenAI.Responses.ResponseCreateParamsNonStreaming = {
       model: this.model, instructions: request.system.map((block) => block.text).join("\n\n"),
       input: inputItems(request.messages) as OpenAI.Responses.ResponseInput,
       max_output_tokens: request.maxTokens, store: false, stream: false, truncation: "disabled",
@@ -115,7 +115,9 @@ export class OpenAIProvider implements ModelProvider {
         description: tool.description, parameters: tool.inputSchema, strict: tool.strict ?? true,
       })) } : {}),
       ...(request.outputSchema ? { text: { format: { type: "json_schema", name: "small_hour_result", strict: true, schema: request.outputSchema } } } : {}),
-    }, { signal: request.signal, maxRetries: 0 });
+    };
+    request.trace?.request(body);
+    const pending = this.client.responses.create(body, { signal: request.signal, maxRetries: 0 });
     let response: Response;
     try { response = await pending.asResponse(); }
     catch (error) {
@@ -130,7 +132,11 @@ export class OpenAIProvider implements ModelProvider {
       throw error;
     }
     const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined;
-    try { return decode(object(await pending), requestId); }
+    try {
+      const data = object(await pending);
+      request.trace?.response(data);
+      return decode(data, requestId);
+    }
     catch (error) { throw invalidResponse(error, requestId); }
   }
   isRetryable = isRetryableHttpError;
