@@ -1,5 +1,9 @@
 # Releases and upgrades
 
+## 0.6.1
+
+The Anthropic adapter accepts optional `temperature` from 0 to 1, preserving explicit zero in requests and traces. Omission keeps the provider default. Invalid values and combinations with thinking are rejected before HTTP. Select a model supporting the requested sampling setting and include it in durable workflow revisions. No storage migration or backfill is required; existing unconfigured consumers retain their behavior.
+
 ## 0.6.0
 
 Optional [execution tracing](tracing.md) joins turn, model-attempt, tool-call and output-check records with a shared trace ID and distinct spans. Applications supply a synchronous sink, explicitly enable content capture, and choose its byte limit. Built-in adapters expose their effective request and decoded response bodies; transport headers and credentials are excluded. Export or capture failures are reported without retrying effects or overriding execution outcomes.
@@ -38,10 +42,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.6.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.6.0):
+Use the versioned package from the [0.6.1 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.6.1):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.6.0/small-hour-0.6.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.6.1/small-hour-0.6.1.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.
