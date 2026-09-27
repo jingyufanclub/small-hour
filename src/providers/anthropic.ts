@@ -14,6 +14,7 @@ export interface AnthropicProviderOptions {
   model: string;
   client?: Anthropic;
   apiKey?: string;
+  temperature?: number;
   thinking?: { type: "adaptive"; effort?: "low" | "medium" | "high" | "xhigh" | "max" };
 }
 
@@ -82,11 +83,20 @@ export class AnthropicProvider implements ModelProvider {
   readonly capabilities: { structuredOutput: true; thinkingBudget: boolean; images: true };
   private readonly client: Anthropic;
   private readonly thinking?: AnthropicProviderOptions["thinking"];
+  private readonly temperature?: number;
 
   get model(): string { return this.options.model; }
 
   constructor(private readonly options: AnthropicProviderOptions) {
     if (!options.model.trim()) throw new TypeError("Anthropic model is required");
+    if (options.temperature !== undefined) {
+      if (typeof options.temperature !== "number" || !Number.isFinite(options.temperature)
+        || options.temperature < 0 || options.temperature > 1) {
+        throw new TypeError("Anthropic temperature must be a finite number from 0 to 1");
+      }
+      if (options.thinking !== undefined) throw new TypeError("Anthropic temperature cannot be combined with thinking");
+      this.temperature = options.temperature;
+    }
     const thinking = options.thinking;
     if (thinking !== undefined) {
       if (!thinking || typeof thinking !== "object" || Array.isArray(thinking) || thinking.type !== "adaptive"
@@ -96,16 +106,18 @@ export class AnthropicProvider implements ModelProvider {
       }
       this.thinking = { type: "adaptive", ...(thinking.effort === undefined ? {} : { effort: thinking.effort }) };
     }
-    this.capabilities = { structuredOutput: true, thinkingBudget: this.thinking === undefined, images: true };
+    this.capabilities = { structuredOutput: true, thinkingBudget: this.thinking === undefined && this.temperature === undefined, images: true };
     this.client = options.client ?? new Anthropic({ apiKey: options.apiKey, maxRetries: 0 });
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     validateImageMessages(request.messages, true);
     if (this.thinking && request.thinking) throw new RuntimeError("adaptive thinking cannot use a manual thinking budget", "thinking_unsupported");
+    if (this.temperature !== undefined && request.thinking) throw new RuntimeError("Anthropic temperature cannot be combined with thinking", "thinking_unsupported");
     const body: Anthropic.MessageCreateParamsNonStreaming = {
       model: this.options.model,
       max_tokens: request.maxTokens + (request.thinking?.budgetTokens ?? 0),
+      ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
       system: anthropicSystem(request.system),
       ...(request.tools.length ? {
         tools: request.tools.map((tool) => ({

@@ -14,6 +14,8 @@ Anthropic and OpenAI Responses support bounded [image input](images.md); choose 
 
 Configure the model and credentials. Structured output uses [`output_config.format`](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) with the supplied schema unchanged. Provider schema support and the application parser both apply.
 
+For models supporting sampling controls, set optional `temperature` from 0 to 1 on `AnthropicProvider`. Explicit zero is preserved; omission leaves the provider default unchanged. The adapter snapshots the value and rejects combining it with adaptive or manual thinking. Model-specific support remains the application's responsibility. Include this setting in durable workflow revisions.
+
 For models supporting adaptive thinking, configure it explicitly on the adapter:
 
 ```ts
