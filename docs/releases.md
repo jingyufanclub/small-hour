@@ -1,5 +1,13 @@
 # Releases and upgrades
 
+## 0.7.0
+
+The optional SQLite spending store accepts overlapping budget scopes. A call must fit every selected allowance before dispatch; one reservation and charge count toward each scope. Existing single-scope quote inputs and inspection shapes remain supported. `ModelSpendQuote` is now a union; narrow `quote.scopes` when reading it and use an intersection rather than interface inheritance when extending it. See the [policy, sequence and storage ERD](model-spending.md).
+
+`initialize()` now runs an independent transaction and migrates existing Small Hour spending rows to format 2. It validates the saved calls, preserves quotes, charges, uncertainty and reconciliation evidence, creates the scope-membership projection, and removes the old parent `scope` column. Other durable tables are unchanged. SQLite 3.35 or later is required for this migration. Initialization failure rolls back all changes; it never imports another ledger or invents memberships for historical calls.
+
+Stop spending callers and back up before initializing the upgraded store. Older runtimes cannot read or write this schema, preventing admission that overlooks overlapping limits. Mixed-version spending writers and automatic downgrades are unsupported. Before any new provider work, a verified pre-upgrade backup can restore the old schema; after new work, preserve and reconcile those later charges before any rollback. Keep compatible spending readers/writers available. Consumer migrations remain separate.
+
 ## 0.6.1
 
 The Anthropic adapter accepts optional `temperature` from 0 to 1, preserving explicit zero in requests and traces. Omission keeps the provider default. Invalid values and combinations with thinking are rejected before HTTP. Select a model supporting the requested sampling setting and include it in durable workflow revisions. No storage migration or backfill is required; existing unconfigured consumers retain their behavior.
@@ -42,10 +50,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.6.1 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.6.1):
+Use the versioned package from the [0.7.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.7.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.6.1/small-hour-0.6.1.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.7.0/small-hour-0.7.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.

@@ -4,7 +4,7 @@ import { EmptyMemorySource, IMAGE_INPUT_LIMITS, SmallHourRuntime, StaticPersonaS
 import { AnthropicProvider } from "small-hour/providers/anthropic";
 import { OpenAIProvider } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
-import { SqliteModelStepStore } from "small-hour/durable/sqlite";
+import { SqliteModelStepStore, SqliteModelSpendStore } from "small-hour/durable/sqlite";
 
 globalThis.fetch = async () => assert.fail("The package consumer must not make network requests");
 assert.match(import.meta.resolve("small-hour"), /\/node_modules\/small-hour\/dist\/index\.js$/);
@@ -89,5 +89,20 @@ if (!process.argv.includes("--core-only")) {
     const state = store.inspect(request);
     assert.equal(state.status, "completed"); assert.equal(state.attempts.length, 2);
     assert.deepEqual(state.attempts[0].report, failed.report);
+    let spending = new SqliteModelSpendStore(db), paidCalls = 0;
+    spending.initialize();
+    const scopes = [{ scope: "application", limit: 10 }, { scope: "account", limit: 6 }];
+    const paid = () => new SmallHourRuntime({ persona: new StaticPersonaSource("Process."), memory: new EmptyMemorySource(),
+      modelCalls: spending.hooks({ quote: () => ({ scopes, amount: 6, pricing: {} }), charge: () => 3 }),
+      provider: { name: "fixture", async complete() { paidCalls++; return answer("Processed."); } } });
+    const pending = await paid().turn(input);
+    db.close(); db = new DatabaseSync(path); spending = new SqliteModelSpendStore(db); spending.initialize();
+    for (const { scope } of scopes) assert.equal(spending.inspectBudget(scope).unknownAmount, 6);
+    await assert.rejects(paid().turn(input), { code: "model_call_denied" });
+    assert.equal(paidCalls, 1);
+    const settlement = { status: "accepted", amount: 3, evidence: "provider:invoice-1" };
+    spending.reconcile(pending.modelCalls[0].callId, settlement); spending.reconcile(pending.modelCalls[0].callId, settlement);
+    for (const { scope } of scopes) assert.equal(spending.inspectBudget(scope).totalAmount, 3);
+    assert.equal(db.prepare("SELECT sum(charged_amount) amount FROM small_hour_model_spend").get().amount, 3);
   } finally { db.close(); }
 }
