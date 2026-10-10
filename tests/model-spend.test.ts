@@ -7,10 +7,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
+import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelCallContext, type ModelCallRecord, type ModelProvider } from "../src/index.js";
 import { SqliteModelSpendStore, SqliteModelStepStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
 import { OpenAICompatibleProvider } from "../src/providers/openai-compatible.js";
+import { callbackGate, deadlineClock } from "./deadline-clock.js";
 
 const input = { agentId: "app-a", input: "Process the selected work.", allowedTools: [] };
 const scope = "app-a:period-1";
@@ -83,9 +84,22 @@ test("an unknown transport outcome consumes the retry budget instead of buying a
 });
 
 test("timeout after submission survives reopen and needs explicit evidence before releasing money", async t => {
+  const clock = deadlineClock(t), callback = callbackGate();
   const app = fixture(t); let calls = 0;
-  await assert.rejects(runtime(app.spend, { name: "fixture", complete: async () => { calls++; return new Promise(() => {}); } },
-    { timeoutMs: 30 }).turn(input), { code: "turn_aborted" });
+  const pending = assert.rejects(runtime(app.spend, { name: "fixture", async complete() {
+    calls++; await callback.wait(); throw new Error("connection closed after timeout");
+  } }, { timeoutMs: 30 }).turn(input), (error: unknown) => {
+    assert.ok(error instanceof RuntimeError);
+    assert.equal(error.code, "turn_aborted");
+    assert.deepEqual(error.report?.modelCalls.map(call => call.status), ["unknown"]);
+    return true;
+  });
+  await callback.entered;
+  assert.equal(calls, 1);
+  assert.equal(app.spend.inspectBudget(scope).reservedAmount, 10);
+  clock.tick(30);
+  await pending;
+  await callback.release();
   const callId = onlyCall(app.db); app.close(); const recovered = app.open();
   const provider: ModelProvider = { name: "fixture", async complete() { calls++; return response; } };
   await assert.rejects(runtime(recovered.spend, provider).turn(input), { code: "model_call_denied" });
@@ -95,7 +109,12 @@ test("timeout after submission survives reopen and needs explicit evidence befor
   const resolution = { status: "rejected" as const, evidence: "provider-review:no-charge-17" };
   recovered.spend.reconcile(callId, resolution); recovered.spend.reconcile(callId, resolution);
   assert.equal(recovered.spend.inspectBudget(scope).totalAmount, 0);
-  await runtime(recovered.spend, provider).turn(input); assert.equal(calls, 2);
+  const result = await runtime(recovered.spend, provider).turn(input);
+  assert.equal(calls, 2);
+  assert.equal(recovered.spend.inspect(callId)?.status, "rejected");
+  assert.equal(recovered.spend.inspect(result.modelCalls[0].callId)?.status, "accepted");
+  assert.equal(recovered.spend.inspectBudget(scope).acceptedAmount, 3);
+  assert.equal(recovered.spend.inspectBudget(scope).totalAmount, 3);
 });
 
 test("missing usage retains the full reservation and a resolved charge is applied exactly once", async t => {
