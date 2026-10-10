@@ -3,7 +3,7 @@ import { SmallHourRuntime, EmptyMemorySource, StaticPersonaSource, IMAGE_INPUT_L
 import { AnthropicProvider, type AnthropicProviderOptions } from "small-hour/providers/anthropic";
 import { OpenAIProvider, type OpenAIProviderOptions } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider, type OpenAICompatibleProviderOptions } from "small-hour/providers/openai-compatible";
-import { SqliteModelStepStore, SqliteTaskRunner, type ModelRecoveryContract, type ModelStepOptions,
+import { SqliteModelStepStore, SqliteTaskRunner, SqliteModelSpendStore, type ModelSpendPolicy, type ModelSpendScope, type ModelRecoveryContract, type ModelStepOptions,
   type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow } from "small-hour/durable/sqlite";
 
 const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only", thinking: { type: "adaptive", effort: "medium" } };
@@ -23,6 +23,9 @@ const request = { scope: "consumer", id: "select-1", kind: "selection", version:
 
 export async function verifyPublicTypes(database: SqliteDatabase, state: ModelStepState) {
   const store = new SqliteModelStepStore(database);
+  const budgets: ModelSpendScope[] = [{ scope: "application", limit: 100 }, { scope: "account", limit: 10 }];
+  const spending: ModelSpendPolicy = { quote: () => ({ scopes: budgets, amount: 5, pricing: {} }), charge: () => 3 };
+  new SqliteModelSpendStore(database).hooks(spending);
   const decision: ModelStepRecoveryDecision = { action: "retry", checkpoint: state.checkpoint, reason: "Retry selected work.", evidence: {} };
   const input = { agentId: "consumer", input: "Select item-7.", structuredOutput: {
     schema: { type: "object" }, parse: (value: unknown) => value as { selectedId: string },

@@ -35,7 +35,7 @@ Code, model and human grading answer different questions. Anthropic's [evaluatio
 
 ## Bound work and preserve evidence
 
-Only the runtime retries provider calls; SDK retries are disabled. Output tokens constrain a call, while calls, hops and deadlines bound a turn. Optional spending scopes span reservations and charges across work. Applications provide prices and estimates; underestimated charges are recorded, and uncertain calls retain reservations. Reasoning effort guides model behavior rather than setting a spending ceiling. See [execution](execution.md), [providers](providers.md) and [spending](model-spending.md).
+Only the runtime retries provider calls; SDK retries are disabled. Output tokens constrain a call, while calls, hops and deadlines bound a turn. Optional spending scopes span reservations and charges across work. One call can count against several limits; admission checks them together and settlement records one charge. Applications provide prices and estimates; underestimated charges are recorded, and uncertain calls retain reservations. Reasoning effort guides model behavior rather than setting a spending ceiling. See [execution](execution.md), [providers](providers.md) and the [spending sequence and ERD](model-spending.md).
 
 Local receipts commit local database effects and results together. Completed model steps replay saved results. Incomplete recovery requires an initially eligible tool-free step, explicit authorization and the inspected checkpoint. Cancellation cannot undo committed effects. Delivery retries consume the saved product without regenerating it. See [local operations](local-operations.md), [model steps](model-steps.md) and [delivery](delivery.md).
 

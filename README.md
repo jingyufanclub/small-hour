@@ -27,7 +27,7 @@ Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool 
 - Optional correlated traces with explicit content capture and an application-supplied sink.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.6.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.7.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Setup
 
@@ -60,7 +60,7 @@ Provider retries are owned by the runtime; SDK retries are disabled. The optiona
 | Image selection, limits and storage | [Image input](docs/images.md) |
 | Atomic local effects | [Local operations](docs/local-operations.md) |
 | Saved model results | [Model steps](docs/model-steps.md) |
-| Persistent budgets | [Model spending](docs/model-spending.md) |
+| Persistent overlapping budgets and storage ERD | [Model spending](docs/model-spending.md) |
 | Claims and ordered steps | [Tasks](docs/tasks.md) |
 | Saved-output handoff | [Delivery](docs/delivery.md) |
 | Authorization and storage | [Security](docs/security.md) |
