@@ -4,12 +4,13 @@ Model input and output are untrusted. Applications authenticate callers, select 
 
 ## Execution boundaries
 
-- Register narrow tools and validate domain inputs. Per-turn allowlists constrain execution; schemas alone cannot authorize effects.
+- Register narrow tools and validate domain inputs. Omitting `allowedTools` offers every registered tool; an explicit list restricts that turn's registered tools, and `[]` offers no registered tools. Structured-output mode offers no tools and cannot be combined with `allowedTools` or `choice`. Authorize resource reads and effects inside application tools; schemas and allowlists do not establish that permission.
 - Declare read/write modes. Choice-governed writes require an accepted choice and explicit authorization for each call. Stable operation IDs must cover repeated requests arriving under different provider IDs.
 - Validate and moderate final output for its destination. A saved result or receipt does not grant permission for new disclosure.
 - Configure context bounds, model-call limits, deadlines, token allowances, and tool-result handling. Preserve required facts when selecting context or replacing oversized results.
+- Monetary limits require `modelCalls.admit` and accounting through `modelCalls.record`. The [spending store](model-spending.md) supplies both hooks; applications supply authenticated scopes, prices, conservative estimates and limits. Call, token and time bounds alone do not enforce a monetary allowance.
 - Keep SDK retries disabled. Unknown effects require evidence-based recovery. Cancellation, lease expiry, and timeouts cannot undo work already started.
-- Choose trusted endpoints and verified model capabilities. HTTP adapters reject redirects; compatible endpoints receive only explicit credentials. Opaque provider history stays unchanged within its original provider's turn.
+- Choose trusted endpoints and verified model capabilities. OpenAI and OpenAI-compatible adapters explicitly reject redirects; compatible endpoints receive only explicit credentials. Anthropic inherits SDK or injected-client transport and credential configuration. Review those [provider settings](providers.md#anthropic) before sending private data. Opaque provider history stays unchanged within its original provider's turn.
 
 The package exposes no unrestricted shell, filesystem, browser, proxy, channel, or credential capabilities. Application tools and sinks remain responsible for the capabilities they implement.
 

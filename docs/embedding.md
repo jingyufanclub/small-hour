@@ -8,7 +8,7 @@
 
 `input` accepts a string or ordered text/image blocks. Explicit input is copied and frozen before loaders run; callbacks receive that selected input. Code using string methods on `context.input` must first narrow with `typeof context.input === "string"`. Selected memory is copied after loading. See [image input](images.md) for provider support, bounds and persistence.
 
-Register tools with `name`, `description`, `inputSchema`, and `execute`. Optional `parse` validates external arguments. Declare `mode: "read" | "write"`; omission defaults to write. `allowedTools` restricts the registry for each turn. Schemas should close object inputs; application validators enforce domain rules.
+Register tools with `name`, `description`, `inputSchema`, and `execute`. Optional `parse` validates external arguments. Declare `mode: "read" | "write"`; omission defaults to write. Omitting `allowedTools` offers every registered tool; pass an explicit list to restrict a turn, or `[]` to offer no registered tools. Dispatch rejects calls to tools that were not offered. Schemas should close object inputs; application tools enforce domain rules and authorize both reads and writes.
 
 Tools execute sequentially. By default, validation and read failures become tool-result errors; `toolErrorMode: "throw"` stops on all failures. A write that throws after starting always ends the turn with `tool_outcome_unknown`. Stable application operation IDs must cover duplicates arriving under different provider call IDs.
 
@@ -25,6 +25,10 @@ Oversized or unserializable tool results fail while preserving completed-tool st
 | `structuredOutput: { schema, parse }` | Returns `status: "structured"` and a validated `value`. Requires one successful provider call, with bounded transport retries. Cannot request tools or combine with `choice` or `allowedTools`. |
 
 Choice parsers return structured-cloneable values. Callbacks receive copies and must not mutate application state. A failing or timed-out `onChoice` retains the accepted decision and ends the turn. Structured-result parsers validate shape and domain constraints; invalid output is not automatically retried.
+
+## Spending admission
+
+To enforce a monetary allowance, configure `modelCalls.admit` and `modelCalls.record` on the runtime. The supplied [spending store](model-spending.md) installs both through `modelCalls: store.hooks(policy)`. Without admission, turns remain bounded by their call, token and time limits, but Small Hour does not enforce a monetary allowance. With the store installed, denial or admission-storage failure prevents the provider call; uncertain charges retain their reservations until reconciled.
 
 ## Results and recovery
 
