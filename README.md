@@ -29,17 +29,106 @@ Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool 
 
 Version 0.7.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
-## Setup
+## Install and run
 
-Requires Node.js 26.10 or later and an ESM consumer. Install the built artifact using the [release and upgrade guide](docs/releases.md), or run `nvm use`, `npm ci` and `npm run build` in a source checkout. Package exports resolve to `dist`; `.nvmrc` selects the development and CI version.
+Requires Node.js 26.10 or later and ESM imports. The release includes built JavaScript and TypeScript declarations:
 
-1. Configure a [provider](docs/providers.md) with its model, endpoint, and credentials.
-2. Construct `SmallHourRuntime` with `provider`, `persona`, and `memory`. `StaticPersonaSource` and `EmptyMemorySource` supply static instructions and empty context.
-3. Register application functions through `ToolRegistry`; configure validation and execution limits.
-4. Call `runtime.turn({ agentId, input, ... })`. Use `allowedTools` to narrow access or `structuredOutput: { schema, parse }` for a typed result.
-5. Handle the result or `RuntimeError.report`. Add durable components when completed work must survive restart.
+```sh
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.7.0/small-hour-0.7.0.tgz
+```
 
-Import the core from `small-hour`; durable components are exported from `small-hour/durable/sqlite`. SQLite connections and drivers are supplied by the application.
+Supply `OPENAI_API_KEY` and `OPENAI_MODEL` in your server environment. Save this as `quickstart.mts` and run `node quickstart.mts`; it makes a billable model request. For a local environment file, use `node --env-file=.env quickstart.mts` and keep that file outside version control.
+
+```ts
+import {
+  SmallHourRuntime, StaticPersonaSource, EmptyMemorySource, RuntimeError,
+} from "small-hour";
+import { OpenAIProvider } from "small-hour/providers/openai";
+
+const model = process.env.OPENAI_MODEL;
+if (!model) throw new Error("Set OPENAI_MODEL to a model available to your account.");
+
+const options = {
+  provider: new OpenAIProvider({ model }),
+  persona: new StaticPersonaSource("Answer concisely using the supplied context."),
+  memory: new EmptyMemorySource(),
+  maxTokens: 1024,
+  maxModelCalls: 1,
+  timeoutMs: 30_000,
+  retry: { attempts: 1 },
+};
+const runtime = new SmallHourRuntime(options);
+
+try {
+  const result = await runtime.turn({
+    agentId: "example",
+    input: "Describe what an agent runtime does in one sentence.",
+    allowedTools: [],
+  });
+  if (result.status === "reply") console.log(result.output);
+  console.log(result.status, result.usage);
+} catch (error) {
+  if (!(error instanceof RuntimeError)) throw error;
+  console.error(error.code, error.report?.usage);
+  process.exitCode = 1;
+}
+```
+
+The example supplies static instructions, no remembered context, no tools, and one model attempt. `turn()` returns the output, status and execution report; failures expose available progress through `RuntimeError.report`. Your app validates the answer for its destination and owns persistence and delivery.
+
+Swap the adapter for [Anthropic or an OpenAI-compatible endpoint](docs/providers.md). Add application functions through `ToolRegistry`, restrict each turn with `allowedTools`, or request a validated value with `structuredOutput: { schema, parse }`; see [embedding](docs/embedding.md). For source builds, upgrades and rollback, use the [release guide](docs/releases.md).
+
+## Enforce a cost budget
+
+Token, call and time limits bound execution. A monetary allowance additionally requires admission and accounting. The optional `SqliteModelSpendStore` reserves each attempt against every selected budget before dispatch and settles it from reported usage.
+
+This extension uses your synchronous SQLite connection `database`, a stable `serviceBudgetScope` for your selected budget period, and two synchronous application functions: `estimateCall(context)` returns `{ amount, pricing }`; `chargeUsage(usage, savedPricing)` returns the actual charge. The example uses integer microdollars: $0.10 per turn and $20 across the shared service period. Choose your own limits.
+
+```ts
+import { SqliteModelSpendStore } from "small-hour/durable/sqlite";
+
+const spending = new SqliteModelSpendStore(database);
+spending.initialize();
+
+const budgetedRuntime = new SmallHourRuntime({
+  ...options,
+  modelCalls: spending.hooks({
+    quote: context => ({
+      ...estimateCall(context),
+      scopes: [
+        { scope: `turn:${context.turnId}`, limit: 100_000 },
+        { scope: serviceBudgetScope, limit: 20_000_000 },
+      ],
+    }),
+    charge: chargeUsage,
+  }),
+});
+```
+
+Use `budgetedRuntime.turn()` with stable application-selected `turnId` values when continuing the same work. An allowance that cannot cover the reservation stops the turn with `model_call_denied` before another provider call. It does not undo previous calls or effects. Inspect totals with `spending.inspectBudget(scope)`.
+
+Your app owns authorized scopes, budget periods, current prices and conservative estimates covering the complete request, context, tools, images and output/reasoning allowance. Small Hour supplies no rate card or estimator; the hook's explicit input does not include selected memory or accumulated tool results. Underestimates can exceed a limit; the full charge is retained and constrains later calls. Uncertain charges keep their reservations until verified reconciliation. See [spending policy and recovery](docs/model-spending.md).
+
+## Connect your tracing
+
+Supply a sink to send correlated turn, model, tool and output-check events to your own logger or observability system. This extension writes metadata as JSON:
+
+```ts
+const tracedRuntime = new SmallHourRuntime({
+  ...options,
+  tracing: {
+    sink: {
+      record(event) {
+        console.log(JSON.stringify(event));
+      },
+    },
+  },
+});
+```
+
+Use `tracedRuntime.turn()` as above. To join an existing application trace, pass `trace: { traceId, parentSpanId }` on the turn: a nonzero 32-character lowercase hexadecimal trace ID and an optional 16-character parent span ID. Omission generates a new trace. Budget hooks and tracing can be configured on the same runtime.
+
+Replace the logger with your own bounded export queue. `record` must return synchronously and promptly; your app owns export, flushing, redaction, access and retention. Content capture is disabled unless you add `content: { maxBytes: yourCaptureLimit }` inside `tracing`. It can include private prompts, selected context, images, tool inputs/results and outputs; oversized values are explicitly omitted. Inspect `result.trace` or `RuntimeError.report.trace` for export/capture failures. See the [tracing contract](docs/tracing.md).
 
 ## Integration requirements
 
