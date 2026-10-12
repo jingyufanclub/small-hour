@@ -6,7 +6,7 @@
 | `OpenAIProvider` | `small-hour/providers/openai` | OpenAI Responses |
 | `OpenAICompatibleProvider` | `small-hour/providers/openai-compatible` | Chat Completions |
 
-Adapters translate messages, tools, reasoning, stop reasons, and usage. Configure a supported model and trusted endpoint. Anthropic and OpenAI use their official SDKs; the compatibility adapter uses direct HTTP. The runtime owns retries and disables SDK retries, including for injected Anthropic clients. OpenAI and compatibility requests reject redirects.
+Adapters translate messages, tools, reasoning, stop reasons, and usage. Configure a supported model and trusted endpoint. Anthropic and OpenAI use their official SDKs; the compatibility adapter uses direct HTTP. The runtime owns retries and disables SDK retries, including for injected Anthropic clients. Each adapter requests redirect rejection. Application-supplied clients and fetch implementations remain trusted code and must honor request options.
 
 Anthropic and OpenAI Responses support bounded [image input](images.md); choose a vision-capable model. The compatibility adapter rejects images before admission or HTTP. Image capability is explicit for custom providers; absence does not grant support.
 
@@ -14,7 +14,9 @@ Anthropic and OpenAI Responses support bounded [image input](images.md); choose 
 
 Configure the model and credentials. Structured output uses [`output_config.format`](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) with the supplied schema unchanged. Provider schema support and the application parser both apply.
 
-The adapter uses `options.client` when supplied, otherwise it constructs the official SDK with the optional `apiKey`. Endpoint, credential fallback, logging and redirect behavior follow that SDK or injected client's configuration. Small Hour does not override those settings for Anthropic. Check the effective configuration before sending private data; SDK retries remain disabled for each model request.
+By default, the adapter constructs the official SDK with a fixed `https://api.anthropic.com` endpoint and a nonblank `apiKey` or `ANTHROPIC_API_KEY`. An explicit blank key fails instead of falling back. Ambient endpoint, bearer-token, profile/configuration and logging settings do not select the connection; SDK logging is off. A nonblank `ANTHROPIC_CUSTOM_HEADERS` fails construction, so extra headers cannot silently replace the selected credentials or add context.
+
+For an application-owned endpoint, authentication scheme, headers or SDK logging, explicitly supply `options.client`. The adapter uses that client unchanged; the application must review its effective configuration before sending private data. Every Messages request still sets `maxRetries: 0` and `fetchOptions.redirect: "error"`, overriding ordinary SDK defaults. Native fetch rejects redirects before forwarding input or credentials. Custom clients or fetch implementations can ignore these controls and are not sandboxed. See the [upgrade guidance](releases.md#090).
 
 For models supporting sampling controls, set optional `temperature` from 0 to 1 on `AnthropicProvider`. Explicit zero is preserved; omission leaves the provider default unchanged. The adapter snapshots the value and rejects combining it with adaptive or manual thinking. Model-specific support remains the application's responsibility. Include this setting in durable workflow revisions.
 

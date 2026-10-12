@@ -1,5 +1,13 @@
 # Releases and upgrades
 
+## 0.9.0
+
+Managed Anthropic connections use only an explicit `apiKey` or `ANTHROPIC_API_KEY`, fix the endpoint to `https://api.anthropic.com`, and disable SDK logging. Missing or blank keys fail during construction; an explicit blank key does not fall back. Ambient bearer tokens, alternate endpoints and SDK profile/configuration no longer select this connection. A nonblank `ANTHROPIC_CUSTOM_HEADERS` fails construction.
+
+Before upgrading, check how the application configures Anthropic. Ordinary API-key consumers need no new option. Applications needing custom endpoints, credentials, headers or SDK logging must explicitly supply their own `client` and review its configuration. Each Messages request disables SDK retries and requests redirect rejection, even with an injected client. Custom clients and fetch implementations remain trusted application code; Small Hour cannot force them to honor these options.
+
+No storage migration or backfill is required. Provider settings belong in the application's workflow revision. Keep the previous package pin for rollback; reverting restores the previous SDK-default behavior, including redirects and environment configuration. Consumer upgrades remain separate. Transport behavior is verified with fake credentials and controlled HTTP responses; live account access is a separate check.
+
 ## 0.8.0
 
 Registered tools now require explicit selection and local validation. Recoverable errors no longer forward arbitrary exception details to the model. This changes the public tool API:
@@ -60,10 +68,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.8.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.8.0):
+Use the versioned package from the [0.9.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.9.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.8.0/small-hour-0.8.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.9.0/small-hour-0.9.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.
