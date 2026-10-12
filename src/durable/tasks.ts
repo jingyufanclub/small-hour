@@ -6,7 +6,8 @@ import { canonicalJson } from "./json.js";
 import { DeliveryLedger, acceptedDelivery, conflictingDeliveryReceipts, deliveryKey, type DeliverySink, type DeliveryState, type DeliveryOutcome } from "./delivery.js";
 import { SqliteModelStepStore, readModelRecoveryContract, readModelStepRecoveryDecision,
   type ModelRecoveryContract, type ModelStepRecoveryDecision, type ModelStepState } from "./model-steps.js";
-import { SqliteOperationStore, type OperationRequest, type SqliteDatabase } from "./sqlite.js";
+import { SqliteOperationStore, type OperationReceipt, type OperationRequest, type SqliteDatabase } from "./sqlite.js";
+import { initializeTimestamps, readTimestamps, recordTime, type RecordTimestamps } from "./lifecycle.js";
 
 export type TaskStatus = "queued" | "running" | "deferred" | "completed" | "cancelled" | "rejected" | "failed" | "uncertain";
 export interface TaskSchedule { concurrencyScope: string; dueAt: number; maxAttempts: number }
@@ -39,7 +40,9 @@ export type TaskStepState = {
   id: string;
   request: OperationRequest;
 } & (
-  | { kind: "local"; model?: never; delivery?: never } & ({ status: "not_started"; result?: never } | { status: "completed"; result: unknown })
+  | { kind: "local"; model?: never; delivery?: never } & (
+    { status: "not_started"; result?: never; receipt?: never } | { status: "completed"; result: unknown; receipt: OperationReceipt<unknown> }
+  )
   | { kind: "model"; delivery?: never } & (
     | { status: "not_started"; model?: never; result?: never }
     | { status: "unresolved"; model: Exclude<ModelStepState, CompletedModelStep>; result?: never }
@@ -50,7 +53,7 @@ export type TaskStepState = {
     | { status: "not_started" | "unresolved"; delivery: Exclude<DeliveryState, CompletedDelivery> }
   )
 );
-export interface TaskState extends OperationRequest, TaskSchedule {
+export interface TaskState extends OperationRequest, TaskSchedule, RecordTimestamps {
   status: TaskStatus;
   attempts: number;
   reason: string | null;
@@ -146,12 +149,15 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         idempotency: step.sink.idempotency, send: step.sink.send.bind(step.sink), reconcile: step.sink.reconcile?.bind(step.sink),
       } } : step.kind === "model" && step.recovery !== undefined ? { ...step, recovery: readModelRecoveryContract(step.recovery) } : { ...step }) };
     });
-    this.operations = new SqliteOperationStore(database); this.models = new SqliteModelStepStore(database);
-    this.deliveries = new DeliveryLedger(database);
+    this.operations = new SqliteOperationStore(database, { now: this.now }); this.models = new SqliteModelStepStore(database, { now: this.now });
+    this.deliveries = new DeliveryLedger(database, { now: this.now });
   }
 
   initialize(): void {
-    this.operations.initialize(); this.models.initialize(); this.deliveries.initialize();
+    const kinds = new Set(this.workflows.flatMap(workflow => workflow.steps.map(step => step.kind)));
+    if (kinds.has("local")) this.operations.initialize();
+    if (kinds.has("model")) this.models.initialize();
+    if (kinds.has("delivery")) this.deliveries.initialize();
     this.database.exec(`CREATE TABLE IF NOT EXISTS small_hour_tasks (
       scope TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL, version TEXT NOT NULL,
       input_json TEXT NOT NULL, plan_json TEXT NOT NULL, schedule_json TEXT NOT NULL,
@@ -161,6 +167,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     );
     CREATE INDEX IF NOT EXISTS small_hour_tasks_due ON small_hour_tasks (kind, version, status, due_at);
     CREATE INDEX IF NOT EXISTS small_hour_tasks_scope ON small_hour_tasks (concurrency_scope, status)`);
+    initializeTimestamps(this.database, "small_hour_tasks", [[1, 2]]);
   }
 
   enqueue(request: OperationRequest, timing: TaskSchedule): TaskState {
@@ -177,11 +184,12 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         }
         return;
       }
+      const time = recordTime(this.now);
       this.changed(this.database.prepare(`INSERT INTO small_hour_tasks
-        (scope, id, kind, version, input_json, plan_json, schedule_json, concurrency_scope, due_at, attempts, status, format_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'queued', 1)`)
+        (scope, id, kind, version, input_json, plan_json, schedule_json, concurrency_scope, due_at, attempts, status, format_version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'queued', 2, ?, ?)`)
         .run(selected.scope, selected.id, selected.kind, selected.version, canonicalJson(selected.input), expectedPlan, expectedSchedule,
-          selectedSchedule.concurrencyScope, selectedSchedule.dueAt));
+          selectedSchedule.concurrencyScope, selectedSchedule.dueAt, time, time));
     });
     return this.inspect(selected)!;
   }
@@ -204,16 +212,16 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         if (!acceptedDelivery(delivery) && delivery.status !== "uncertain" && ["rejected", "deferred", "cancelled"].includes(state.status)
           && (delivery.status !== state.status || !("reason" in delivery) || delivery.reason !== state.reason
             || (delivery.status === "deferred" && delivery.dueAt !== state.dueAt))) {
-          const attempts = delivery.attempts;
-          delivery = state.status !== "deferred" ? { attempts, status: "rejected", reason: state.reason!, evidence: { authority: "task_policy" } }
-            : { attempts, status: "deferred", reason: state.reason!, dueAt: state.dueAt, evidence: { authority: "task_policy" } };
+          const { attempts, createdAt, updatedAt } = delivery;
+          delivery = state.status !== "deferred" ? { attempts, createdAt, updatedAt, status: "rejected", reason: state.reason!, evidence: { authority: "task_policy" } }
+            : { attempts, createdAt, updatedAt, status: "deferred", reason: state.reason!, dueAt: state.dueAt, evidence: { authority: "task_policy" } };
         }
         return acceptedDelivery(delivery) ? { id: step.id, kind: "delivery", request, delivery, status: "completed" }
           : { id: step.id, kind: "delivery", request, delivery, status: delivery.attempts.length ? "unresolved" : "not_started" };
       }
       if (step.kind === "local") {
         const receipt = this.operations.find(request, value => value);
-        return receipt ? { id: step.id, kind: "local", request, status: "completed", result: receipt.result }
+        return receipt ? { id: step.id, kind: "local", request, status: "completed", result: receipt.result, receipt }
           : { id: step.id, kind: "local", request, status: "not_started" };
       }
       const model = this.models.inspect(request);
@@ -235,10 +243,11 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     this.transaction(() => {
       const task = this.required(key);
       if (!["queued", "deferred", "running", "uncertain"].includes(task.status)) return;
+      if (task.cancellationReason !== null) return;
       this.changed(this.database.prepare(`UPDATE small_hour_tasks SET cancellation_reason = ?,
         status = CASE WHEN status IN ('running', 'uncertain') THEN status ELSE 'cancelled' END,
-        reason = CASE WHEN status IN ('running', 'uncertain') THEN reason ELSE ? END WHERE scope = ? AND id = ?`)
-        .run(task.cancellationReason ?? reason, task.cancellationReason ?? reason, key.scope, key.id));
+        reason = CASE WHEN status IN ('running', 'uncertain') THEN reason ELSE ? END, updated_at = ? WHERE scope = ? AND id = ?`)
+        .run(reason, reason, recordTime(this.now, task.updatedAt), key.scope, key.id));
     });
     return this.inspect(key)!;
   }
@@ -251,8 +260,8 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       const task = this.required(key);
       if (task.resolution && canonicalJson(task.resolution) === json) return;
       if (task.status !== "uncertain") throw new TaskError("task_changed", "Only uncertain tasks accept a resolution.");
-      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, resolution_json = ? WHERE scope = ? AND id = ?`)
-        .run(resolution.status, resolution.reason, json, key.scope, key.id));
+      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, resolution_json = ?, updated_at = ? WHERE scope = ? AND id = ?`)
+        .run(resolution.status, resolution.reason, json, recordTime(this.now, task.updatedAt), key.scope, key.id));
     });
     return this.inspect(key)!;
   }
@@ -468,12 +477,15 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         const delivered = delivery && acceptedDelivery(delivery);
         const uncertain = delivery ? delivery.status === "uncertain" : ["running", "uncertain"].includes(task.status);
         const status = delivered ? (task.cancellationReason ? "cancelled" : "completed") : uncertain ? "uncertain" : "failed";
-        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, token = NULL, lease_until = NULL WHERE scope = ? AND id = ?`)
-          .run(status, delivered ? task.cancellationReason : "attempt_limit", task.scope, task.id));
+        const reason = delivered ? task.cancellationReason : "attempt_limit";
+        if (task.status !== status || task.reason !== reason || task.token !== null || task.leaseUntil !== null) {
+          this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, token = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ?`)
+            .run(status, reason, recordTime(this.now, task.updatedAt), task.scope, task.id));
+        }
       } else {
         const expires = now + this.leaseMs; integer(expires);
-        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = 'running', token = ?, lease_until = ?, attempts = attempts + 1, reason = NULL WHERE scope = ? AND id = ?`)
-          .run(randomUUID(), expires, task.scope, task.id));
+        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = 'running', token = ?, lease_until = ?, attempts = attempts + 1, reason = NULL, updated_at = ? WHERE scope = ? AND id = ?`)
+          .run(randomUUID(), expires, recordTime(this.now, task.updatedAt), task.scope, task.id));
       }
       return this.required(task);
     });
@@ -492,18 +504,19 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
   }
   private renew(task: StoredTask): void {
     this.transaction(() => {
-      this.fenced(task);
+      const current = this.fenced(task);
       const expires = this.time() + this.leaseMs; integer(expires);
-      this.changed(this.database.prepare("UPDATE small_hour_tasks SET lease_until = ? WHERE scope = ? AND id = ? AND token = ?")
-        .run(expires, task.scope, task.id, task.token));
+      if (expires === current.leaseUntil) return;
+      this.changed(this.database.prepare("UPDATE small_hour_tasks SET lease_until = ?, updated_at = ? WHERE scope = ? AND id = ? AND token = ?")
+        .run(expires, recordTime(this.now, current.updatedAt), task.scope, task.id, task.token));
     });
   }
   private finish(task: StoredTask, status: Exclude<TaskStatus, "queued" | "running">, reason: string | null, dueAt = task.dueAt): TaskState {
     this.transaction(() => {
       const current = this.fenced(task);
       if (current.cancellationReason && status !== "uncertain") { status = "cancelled"; reason = current.cancellationReason; }
-      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, due_at = ?, token = NULL, lease_until = NULL WHERE scope = ? AND id = ? AND token = ?`)
-        .run(status, reason, dueAt, task.scope, task.id, task.token));
+      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, due_at = ?, token = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ? AND token = ?`)
+        .run(status, reason, dueAt, recordTime(this.now, current.updatedAt), task.scope, task.id, task.token));
     });
     return this.inspect(task)!;
   }
@@ -526,7 +539,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     const row = this.database.prepare("SELECT * FROM small_hour_tasks WHERE scope = ? AND id = ?").get(key.scope, key.id) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     try {
-      if (Number(row.format_version) !== 1) throw new TypeError("Unsupported task format");
+      if (Number(row.format_version) !== 2) throw new TypeError("Unsupported task format");
       for (const field of ["input_json", "plan_json", "schedule_json"]) nonempty(row[field]);
       const request = identity({ scope: key.scope, id: key.id, kind: row.kind as string, version: row.version as string, input: JSON.parse(row.input_json as string) });
       const timing = schedule(JSON.parse(row.schedule_json as string));
@@ -546,7 +559,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       const resolution = row.resolution_json === null ? null : JSON.parse(row.resolution_json as string) as TaskResolution;
       if (row.resolution_json !== null && (!resolution || !["failed", "cancelled"].includes(resolution.status) || resolution.status !== status
         || resolution.reason !== row.reason || resolution.evidence == null || canonicalJson(resolution) !== row.resolution_json)) throw new TypeError("Invalid resolution");
-      return { ...request, ...timing, dueAt: row.due_at as number, plan: steps, status, attempts: row.attempts as number,
+      return { ...request, ...timing, ...readTimestamps(row), dueAt: row.due_at as number, plan: steps, status, attempts: row.attempts as number,
         reason: row.reason as string | null, cancellationReason: row.cancellation_reason as string | null,
         token: row.token as string | null, leaseUntil: row.lease_until as number | null, resolution, scheduleJson: row.schedule_json as string };
     } catch (cause) { throw new TaskError("invalid_task", "The saved task failed validation.", { cause }); }

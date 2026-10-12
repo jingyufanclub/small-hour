@@ -58,10 +58,10 @@ function saveOutfit(db: DatabaseSync): Outfit {
 
 test("a lost outfit-save response replays the original outfit after reopening the database", (t) => {
   const app = fixture(t);
-  const first = app.store.commit(request, { execute: saveOutfit, parseResult: parseOutfit });
+  const first = new SqliteOperationStore(app.db, { now: () => 100 }).commit(request, { execute: saveOutfit, parseResult: parseOutfit });
   assert.equal(first.replayed, false);
   assert.deepEqual(first.receipt, { scope: request.scope, id: request.id, kind: request.kind,
-    version: request.version, result: { outfitId: 1, itemIds: ["coat-7", "boots-2"] } });
+    version: request.version, result: { outfitId: 1, itemIds: ["coat-7", "boots-2"] }, createdAt: 100, updatedAt: 100 });
   app.close();
 
   const recovered = app.open();

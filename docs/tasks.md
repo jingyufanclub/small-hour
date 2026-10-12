@@ -1,6 +1,6 @@
 # Tasks
 
-`SqliteTaskRunner` executes fixed workflows using an application-supplied synchronous SQLite connection. Construct it with workflow definitions and `{ leaseMs, now? }`, then call `initialize()`. Initialization creates `small_hour_tasks`, its indexes and the local-operation, model-step, and delivery-evidence tables. No polling loop starts.
+`SqliteTaskRunner` executes fixed workflows using an application-supplied synchronous SQLite connection. Construct it with workflow definitions and `{ leaseMs, now? }`, then call `initialize()`. Initialization creates or upgrades `small_hour_tasks`, its indexes, and only the evidence stores required by registered step kinds. Local/model workflows need no delivery storage. Spending is initialized separately. No polling loop starts. See [store selection and the ERD](storage.md).
 
 ## Definitions and submission
 
@@ -30,7 +30,7 @@ Leases renew between steps. Set `leaseMs` above the longest step; no heartbeat e
 
 ## Recovery
 
-`inspect(key)` returns lifecycle, reasons, attempts, cancellation, resolutions, and step evidence. `completed` requires accepted step results; device/user receipt still requires delivery evidence.
+`inspect(key)` returns lifecycle, reasons, attempts, cancellation, resolutions, and step evidence. Task state and saved step records include [lifecycle timestamps](storage.md#lifecycle-timestamps); completed local steps expose `receipt` alongside `result`. `completed` requires accepted step results; device/user receipt still requires delivery evidence.
 
 `retry(error, context)` may return `{ dueAt, reason }` only for rolled-back local attempts within the limit. Incomplete model work is never replayed automatically. Provider retries remain in the core.
 

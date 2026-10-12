@@ -17,7 +17,7 @@ The package exposes no unrestricted shell, filesystem, browser, proxy, channel, 
 
 ## Storage and access
 
-Durable components are opt-in and use a supplied synchronous SQLite connection through `exec`, `prepare`, `get`, and `run`. Constructors open no connection or worker. `initialize()` creates versioned tables; it does not migrate application rows or import historical effects/spending.
+Durable components are opt-in and use a supplied synchronous SQLite connection through `exec`, `prepare`, `get`, and `run`. Constructors open no connection or worker. `initialize()` creates or upgrades the component's versioned tables; it does not migrate application rows or import historical effects/spending. Follow the [storage upgrade requirements](releases.md#0100); timestamps cannot authorize recovery or establish a remote outcome.
 
 Applications own connection lifetime, durability settings, busy timeout, backup, access control, and retention. Authenticate all administrative APIs. Storage/busy errors propagate without another retry loop. Restore or replace a connection after an unconfirmed rollback before attempting recovery.
 

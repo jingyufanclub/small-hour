@@ -58,7 +58,7 @@ test("a completed image turn preserves exact bytes and order across reopen witho
     memory: { async load() { loads++; return []; } } });
   const first = await app.store.run(request, model, input);
   const row = app.db.prepare("SELECT turn_json, format_version, report_json, result_json FROM small_hour_model_steps").get()!;
-  assert.equal(row.format_version, 1);
+  assert.equal(row.format_version, 3);
   assert.deepEqual(JSON.parse(String(row.turn_json)).input, input.input);
   assert.ok(!String(row.report_json).includes(png.data)); assert.ok(!String(row.result_json).includes(png.data));
   app.close(); const reopened = app.open();
@@ -169,7 +169,7 @@ test("malformed and over-limit image requests fail before any durable row, conte
 });
 
 for (const recoverable of [false, true]) {
-  test(`malformed saved image content fails closed at inspect, replay, and recovery in format ${recoverable ? 2 : 1}`, async t => {
+  test(`malformed saved image content fails closed at inspect, replay, and recovery in format ${recoverable ? 4 : 3}`, async t => {
     const { db, store } = fixture(t); let calls = 0;
     const model = runtime({ name: "fixture", async complete() { calls++; return text(); } });
     const input = turn("Select item-b.");

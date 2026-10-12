@@ -34,7 +34,7 @@ Text, images, tools, and structured results are supported. Streaming and audio i
 Requires Node.js 26.10 or later and ESM imports. The release includes built JavaScript and TypeScript declarations:
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.9.0/small-hour-0.9.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.10.0/small-hour-0.10.0.tgz
 ```
 
 Supply `OPENAI_API_KEY` and `OPENAI_MODEL` in your server environment. Save this as `quickstart.mts` and run `node quickstart.mts`; it makes a billable model request. For a local environment file, use `node --env-file=.env quickstart.mts` and keep that file outside version control.
@@ -149,7 +149,8 @@ Provider retries are owned by the runtime; SDK retries are disabled. The optiona
 | Image selection, limits and storage | [Image input](docs/images.md) |
 | Atomic local effects | [Local operations](docs/local-operations.md) |
 | Saved model results | [Model steps](docs/model-steps.md) |
-| Persistent overlapping budgets and storage ERD | [Model spending](docs/model-spending.md) |
+| Persistent overlapping budgets | [Model spending](docs/model-spending.md) |
+| Store selection, lifecycle timestamps and ERD | [Durable storage](docs/storage.md) |
 | Claims and ordered steps | [Tasks](docs/tasks.md) |
 | Saved-output handoff | [Delivery](docs/delivery.md) |
 | Authorization and storage | [Security](docs/security.md) |

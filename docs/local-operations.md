@@ -11,6 +11,8 @@ Import `SqliteOperationStore` from `small-hour/durable/sqlite`, supply an existi
 
 `OperationRequest` contains nonempty `scope`, `id`, `kind`, `version`, and JSON `input`. `(scope, id)` is bound to the exact contract. Conflicting reuse throws `contract_conflict` before execution.
 
+Receipts include [lifecycle timestamps](storage.md#lifecycle-timestamps). Completed replay returns the original times. The optional constructor argument `{ now }` supplies the millisecond clock.
+
 Inputs and results accept plain JSON: finite numbers, strings, booleans, null, dense arrays, and plain data objects. Unsupported values fail. Object-key order is insignificant; array order and values remain exact. No size limit or truncation policy is imposed.
 
 `parseResult` validates new and replayed results synchronously and preserves their JSON values. It cannot substitute IDs or reinterpret decisions. Invalid new results throw `invalid_result`; invalid saved receipts throw `invalid_receipt`. Neither permits replaying the effect under that identity.

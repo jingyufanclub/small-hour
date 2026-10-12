@@ -4,7 +4,7 @@ import { AnthropicProvider, type AnthropicProviderOptions } from "small-hour/pro
 import { OpenAIProvider, type OpenAIProviderOptions } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider, type OpenAICompatibleProviderOptions } from "small-hour/providers/openai-compatible";
 import { SqliteModelStepStore, SqliteTaskRunner, SqliteModelSpendStore, type ModelSpendPolicy, type ModelSpendScope, type ModelRecoveryContract, type ModelStepOptions,
-  type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow } from "small-hour/durable/sqlite";
+  type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow, type DurableClockOptions, type RecordTimestamps } from "small-hour/durable/sqlite";
 
 const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only", thinking: { type: "adaptive", effort: "medium" } };
 const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only", reasoningEffort: "max" };
@@ -35,7 +35,8 @@ const options: ModelStepOptions = { recovery };
 const request = { scope: "consumer", id: "select-1", kind: "selection", version: "1", input: { id: "item-7" } };
 
 export async function verifyPublicTypes(database: SqliteDatabase, state: ModelStepState) {
-  const store = new SqliteModelStepStore(database);
+  const clock: DurableClockOptions = { now: () => 100 };
+  const store = new SqliteModelStepStore(database, clock);
   const budgets: ModelSpendScope[] = [{ scope: "application", limit: 100 }, { scope: "account", limit: 10 }];
   const spending: ModelSpendPolicy = { quote: () => ({ scopes: budgets, amount: 5, pricing: {} }), charge: () => 3 };
   new SqliteModelSpendStore(database).hooks(spending);
@@ -44,6 +45,7 @@ export async function verifyPublicTypes(database: SqliteDatabase, state: ModelSt
     schema: { type: "object" }, parse: (value: unknown) => value as { selectedId: string },
   } };
   const first = await store.run(request, runtime, input, options);
+  const timestamps: RecordTimestamps = { createdAt: first.createdAt, updatedAt: first.updatedAt };
   const selectedId: string = first.result.value.selectedId;
   const trace: TraceSummary | undefined = first.result.trace;
   const retried = await store.recover(request, runtime, input, decision);
@@ -52,5 +54,5 @@ export async function verifyPublicTypes(database: SqliteDatabase, state: ModelSt
     { id: "select", kind: "model", recovery, prepare: () => ({ runtime, input }) },
   ] };
   const runner = new SqliteTaskRunner(database, [workflow], { leaseMs: 1000 });
-  return { selectedId, stop, runner, trace };
+  return { selectedId, stop, runner, trace, timestamps };
 }
