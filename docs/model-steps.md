@@ -1,57 +1,47 @@
-# Model steps
+# Save and reuse a model result
 
-`SqliteModelStepStore` wraps a `SmallHourRuntime` and preserves completed results and available progress. Import it from `small-hour/durable/sqlite`, supply a synchronous connection, and call `initialize()` to create `small_hour_model_steps`.
+Use `SqliteModelStepStore` when your app must remember a model operation across restarts. A completed result can be returned again without another model call or repeated tools. An unfinished operation stays unresolved until your app investigates.
 
-## Execution
+Import the store from `small-hour/durable/sqlite`, supply your synchronous SQLite connection, and call `initialize()`.
 
-`run(request, runtime, input)` returns `{ attemptId, replayed, result, createdAt, updatedAt }`. The result retains structured, reply, silence, or rejected status. A completed rejection remains a rejection on replay. Inspection exposes the same [lifecycle timestamps](storage.md#lifecycle-timestamps); the optional constructor argument `{ now }` supplies the millisecond clock.
+## Run and inspect
 
-The scoped `OperationRequest` binds kind, version, JSON input, and turn configuration: agent/input identity, explicit turn ID, schemas, token/choice settings, and allowed tools. Changed contracts fail before model or tool execution. Signals and callback implementations are excluded. Include revisions or immutable references for instructions, context, provider settings, validators, and effect policy; closure contents cannot be fingerprinted. Inputs are copied. Without an explicit turn ID, the attempt ID becomes its turn ID.
-
-A `started` record commits before context loading or provider execution. Awaited checkpoints preserve model-call IDs, [provider stop evidence](execution.md), usage/accounting state, accepted choices, tool outcomes, and receipt references. The runtime retains provider retry and deadline ownership. Failed checkpoints stop further execution.
-
-Completion validates and saves the full result before returning. Exact replay skips context loading, models, tools, text policy, and accounting. Structured-result and choice parsers revalidate saved values; they must be pure, synchronous, and JSON-preserving.
-
-## Inspection and recovery
-
-`inspect(request)` validates identity/storage and returns `undefined` or:
-
-| State | Available evidence |
+| Method | Result |
 | --- | --- |
-| `started` | Attempt ID and latest committed progress; execution may still be active. |
-| `failed` | Attempt ID, partial report, and error code; effects or costs may remain uncertain. |
-| `completed` | Exact result and report, including acceptance status. |
+| `run(request, runtime, input)` | Runs new work or returns its completed result, with `attemptId`, `replayed`, and timestamps. |
+| `inspect(request)` | Returns the saved state, or `undefined` if no step exists. |
 
-Application domain validation still applies. Malformed checkpoints fail with `invalid_checkpoint`; they never authorize regeneration. Re-entry through `run` into started or failed work throws `step_unresolved` with inspected state. Inspection includes a stable `checkpoint` token and an ordered `attempts` history including the current attempt.
+`request` contains `scope`, `id`, `kind`, `version`, and JSON `input`. The combination of scope and ID identifies the operation. Reusing it with a different input or saved turn configuration raises `contract_conflict` before execution.
 
-Reconciliation must establish whether old work can continue, preserve accepted decisions, and inspect authoritative effects and spending. Any next execution needs an explicit identity and authorization; changing an ID alone does not make repetition safe. A response received before a failed completion commit remains incomplete. Known charges do not complete a model step, and a saved result does not prove complete accounting. Use stable scopes with [model spending](model-spending.md).
+Include revisions for instructions, context sources, provider settings, validators, and effect policy in your operation contract. Small Hour cannot detect changed callback code or captured variables. Without an explicit turn ID, the initial attempt ID becomes the turn ID.
 
-## Explicit recovery
+## What gets saved?
 
-An application may opt a step into bounded recovery on its first `run`:
+The store commits a started record before loading context or calling the model. During execution, it saves available progress: call IDs, stop reasons, usage/accounting state, accepted choices, tool outcomes, and receipt references.
 
-```ts
-await steps.run(request, runtime, input, {
-  recovery: { sideEffectFree: true, maxAttempts: 3, maxModelCalls: 5 },
-});
-```
+Completion saves the full result, including reply, silence, structured, or rejected status. A saved rejection remains a rejection.
 
-Recovery requires structured output or explicit `allowedTools: []`, with no choice callback. `sideEffectFree` is the application's promise that context loading, parsing, and output policy have no domain effects. The runtime cannot inspect callback implementations. Keep their versions and provider/spending configuration bound to the workflow contract.
+Explicit input, including image bytes, is stored. Retrieved memory and provider-native conversation history are not automatically copied. Your app controls [access and retention](security.md).
 
-After inspecting incomplete work, the application can call `recover(request, runtime, input, decision, guard?)` with `{ action: "retry", checkpoint, reason, evidence }`. Evidence must be JSON; the checkpoint must exactly match the inspected state. The operation validates the unchanged turn and stored limits, archives the old attempt with the decision, and atomically replaces its attempt ID. The logical step and turn IDs remain stable; provider call IDs remain distinct. A fresh runtime cannot reset the stored allowance. Completed results replay without regeneration, including rejected output.
+## What happens on repeat?
 
-`maxAttempts` includes the original attempt. `maxModelCalls` applies across all attempts and provider retries, before admission or dispatch. Every call record counts conservatively, including `not_started`; a blocked extra record is retained as evidence. Recovery does not settle spending, refund an uncertain call, or supply a monetary ceiling.
+| Saved state | Behavior |
+| --- | --- |
+| `completed` | Return the saved result; skip context loading, model/tools, text policy, and accounting. |
+| `started` | Work may still be running; raise `step_unresolved`. |
+| `failed` | Costs or effects may be uncertain; raise `step_unresolved`. |
+| Invalid saved data | Raise `invalid_checkpoint`; never regenerate automatically. |
 
-Late workers can add report facts only to their archived attempt and then receive `step_changed`. They cannot replace the current result. New evidence changes the checkpoint, so an earlier recovery decision becomes stale. Crashes before or after takeover require a fresh inspection and decision; no recovery worker or automatic retry starts.
+Structured-result and choice parsers revalidate saved values. They must be pure, synchronous, and preserve the exact JSON values. Current permission to disclose a result remains your app's responsibility.
 
-Ordinary and recovery-enabled records use formats 3 and 4 respectively. Initialization upgrades prior rows while preserving payloads and recovery checkpoints; it cannot grant recovery eligibility after execution. Historical timestamps remain unknown. See [storage upgrades and rollback](releases.md#0100).
+For eligible tool-free work, see [explicit recovery](model-recovery.md). A failed completion write can leave a received answer unresolved. Changing the ID does not make repetition safe.
 
-## Transactions and guards
+## Transactions and cancellation
 
-Start, progress, completion, and failure use independent short transactions. An outer transaction prevents execution; no database transaction spans a model/tool await. Concurrent starts serialize; only the new record's creator executes. Busy/storage errors propagate. After cancellation, failure handling may make one synchronous attempt to preserve its report without starting effects.
+Start, progress, completion, and failure use independent short transactions. An outer transaction prevents execution; no transaction stays open while awaiting the model. Concurrent starts serialize; only the record's creator runs new work. Storage errors propagate.
 
-The optional fourth argument `{ assertActive() }` supplies a synchronous guard alongside recovery options. It checks entry, progress, and final acceptance, saving available facts before rejecting continuation. Completed replay skips the guard; consuming boundaries still authorize disclosure and effects. [Tasks](tasks.md) use it for claims and cancellation.
+Optional `{ assertActive() }` on `run` checks entry, progress, and final acceptance. Completed replay skips this guard. [Tasks](tasks.md) use it for claims and cancellation.
 
-The table stores explicit contracts, configuration, reports, and results. Explicit [image input](images.md) stores exact bytes and order in the existing turn record; changed valid input conflicts and malformed stored input fails validation. It does not automatically retain retrieved memory or provider-native history. Keep secrets out of contracts and tool arguments. Retain evidence and compatible handlers during rollback; initialization makes no application backfill. See [storage and access](security.md) and the [runtime observer](execution.md).
+After cancellation, one synchronous save may preserve the failure report. Check [spending](spending-records.md) separately: a saved result does not prove complete accounting.
 
-Stop evidence is optional. Rows written without it remain readable and are not backfilled. Readers validate supplied evidence and reject a final stop that contradicts the saved result. Consumers with exhaustive stop-reason switches must handle `context_limit` and `pause`.
+See [timestamps](storage-schema.md#lifecycle-timestamps) and [storage upgrades](releases.md#0100) before changing deployed versions.

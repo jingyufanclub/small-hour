@@ -1,39 +1,45 @@
-# Saved-output delivery
+# Send a saved output
 
-The task runner hands exact saved products to application-supplied sinks. Applications select destinations, authorize disclosure, implement transports, and verify receipts.
+Use a delivery task when your app has already decided **what to send and where**, and needs to track sending across failures. Recovery uses the same saved content; it does not ask the model to rewrite it.
+
+Your app implements the transport, checks permission, and verifies evidence from the destination.
 
 ## Stage and send
 
-Define a workflow with one `{ id, kind: "delivery", sink }` step. Model/local steps and a local retry policy are prohibited. The task's scoped identity and JSON input are the immutable output contract, including destination and payload. Version changed sink semantics; capabilities are bound in the saved manifest. Referenced media must retain its original bytes throughout recovery.
+Define a workflow with one `{ id, kind: "delivery", sink }` step. A delivery workflow cannot contain model/local steps or a local retry policy.
 
-Enqueue in the transaction that commits the originating product or local effect. Both commit or roll back together. Dispatch uses an independent transaction and cannot send uncommitted output.
+Save its destination and payload in the task input. Enqueue it in the transaction that commits the originating product or database change. Sending cannot begin before that transaction commits. Preserve referenced media bytes during recovery.
 
-The existing runner claims work, checks current permission/cancellation, and commits an uncertain attempt before invoking the sink. `DeliverySink` supplies `idempotency: "key" | "none"`, `send(product, context)`, and optional `reconcile(product, context)`. Context includes a stable scoped `idempotencyKey`, signal, and `assertActive()`.
+The runner claims work, checks permission/cancellation, and saves an uncertain attempt **before** calling the sink.
 
-Preserve product identity, destination, and payload. Issue one attempt per invocation with SDK retries disabled. Supply request timeouts, cooperative cancellation, and a sufficiently long claim lease. Recheck changing permissions at the actual effect boundary; a callback cannot make remote authorization atomic.
+A **sink** is your transport implementation:
 
-## Evidence
+- `idempotency: "key" | "none"` describes its duplicate protection.
+- `send(product, context)` makes one sending attempt.
+- Optional `reconcile(product, context)` checks what happened without sending.
 
-| Outcome | Contract |
+Context supplies a stable `idempotencyKey`, signal, and `assertActive()`. Disable transport SDK retries, set timeouts, and keep the claim lease long enough. Recheck permission where sending occurs.
+
+## What the result means
+
+| Outcome | Required meaning |
 | --- | --- |
-| `deferred` | Reason, due time, and evidence prove non-acceptance and exclude late acceptance; retry may occur later. |
-| `rejected` | Reason and evidence establish terminal refusal without acceptance. |
-| `uncertain` | Reason and optional evidence; acceptance remains unknown. |
-| `accepted` | `receipt: { id, evidence }` establishes provider acceptance. |
-| `confirmed` | Same receipt plus `confirmation: { level, evidence }`; level identifies destination, device, or user receipt. |
+| `deferred` | Evidence proves non-acceptance, excludes late acceptance, and supplies a later due time. |
+| `rejected` | Evidence proves terminal refusal without acceptance. |
+| `uncertain` | Acceptance is unknown. |
+| `accepted` | `receipt: { id, evidence }` proves provider acceptance. |
+| `confirmed` | Receipt plus `confirmation: { level, evidence }` proves destination, device, or user receipt. |
 
-Definite outcomes require JSON evidence. Validation rejects malformed or contradictory fields; applications verify authenticity. Acceptance alone does not prove device/user receipt. Send exceptions retain uncertainty and return the original error. Storage/validation errors propagate. A failed pre-send commit prevents dispatch; failed post-send storage cannot claim success.
+Supply reasons for deferred/rejected/uncertain outcomes. Definite outcomes require JSON evidence; your app verifies authenticity. Provider acceptance alone does not prove the user received anything.
 
-## Recovery and inspection
+A send exception keeps the attempt uncertain. Failed pre-send storage prevents dispatch; failed post-send storage cannot claim success.
 
-`runNext()` handles due deferrals and expired claims. `retryDelivery(key, { signal? })` explicitly recovers uncertain tasks using the original product. Every claimed recovery consumes the task allowance; exhaustion stops sink calls.
+## Recover safely
 
-`"key"` requires remote deduplication across the entire recovery window, including overlapping expired workers. Attaching a key is insufficient. Otherwise, authoritative reconciliation must cover every unresolved send and possible late acceptance. A lookup miss, timeout, or cancellation cannot establish non-acceptance. Reconciliation receives current authorization and must not send or regenerate output. Unknown work remains blocked and occupies its scope.
+`runNext()` handles due deferrals and expired claims. `retryDelivery(key, { signal? })` explicitly revisits uncertainty. Every claimed attempt consumes the task allowance.
 
-`recordDeliveryOutcome(key, { attemptId, outcome })` saves verified evidence for an existing attempt without sending or claiming. Confirmation retains the remote identity; weaker evidence cannot erase acceptance. `retryDelivery()` can settle known acceptance after exhaustion; `runNext()` recovers expired claims. Recording evidence alone does not complete the task.
+For `"key"`, the remote service must actually deduplicate across the recovery window, including overlapping workers. Otherwise, reconciliation must establish the outcome of every unresolved send and rule out late acceptance. A missing lookup, timeout, or cancellation cannot prove non-acceptance. Unknown work stays blocked and holds its scope.
 
-Inspection exposes the exact product in `steps[0].request`, and attempt outcomes in `steps[0].delivery`. Check task lifecycle separately. Late receipts survive claim loss and cancellation; stale workers cannot finalize tasks. Conflicting receipt identities block recovery. No general exactly-once guarantee is supplied.
+`recordDeliveryOutcome(key, { attemptId, outcome })` records verified evidence without sending. It does not itself complete the task. Known acceptance can still be settled after attempts are exhausted. Late evidence survives cancellation/claim loss; conflicting receipt IDs block recovery.
 
-Delivery state includes [lifecycle timestamps](storage.md#lifecycle-timestamps) for locally retained evidence. Identical or weaker evidence preserves those times; a stronger confirmation advances the update time. These are not remote acceptance or receipt timestamps.
-
-Payload remains in the task row; `small_hour_deliveries` stores attempt evidence. Retain both and compatible handlers during rollout/rollback. No backfill or second transport authority is added. See [tasks](tasks.md) and [storage and access](security.md).
+Inspect the saved product at `steps[0].request`, delivery evidence at `steps[0].delivery`, and task status separately. Keep both task and evidence records. [Timestamps](storage-schema.md#lifecycle-timestamps) describe local evidence, not remote receipt time. Version changes to sink behavior in the workflow definition.

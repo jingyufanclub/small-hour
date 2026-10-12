@@ -1,50 +1,36 @@
-# Architecture decisions
+# Architecture and responsibilities
 
-Small Hour runs bounded model calls inside application-defined workflows. The application owns workflows, domain policy and the final user experience; models perform assigned interpretation and generation. The [runtime diagrams](runtime.md) show the call sequence and recovery path.
+Small Hour runs a model/tool exchange inside your application. Your app decides the workflow; Small Hour carries out its model calls and execution checks. The [runtime diagram](runtime.md) shows the order.
 
-## Choose the execution pattern
+## Give each decision one owner
 
-Use an application-defined sequence when the stages are known. Small Hour supports model/tool turns and optional ordered durable steps. Routing to a workflow, model or tool set belongs to the application. The runtime does not generate workflows, spawn subagents or run a second model to judge every response.
+| Decision | Owner |
+| --- | --- |
+| Which workflow, model, instructions, and context to use | Application |
+| How to interpret information and generate a candidate answer | Model |
+| Which tools may be offered and what their arguments mean | Application |
+| Enforcing the tool list, invoking argument validation, and dispatching tools | Small Hour |
+| Whether this caller may read or change a specific record | Application, inside the tool |
+| Provider retries, turn limits, and execution reports | Small Hour |
+| Budget amounts, prices, and who shares a budget | Application; optional Small Hour spending store enforces reservations |
+| Whether an answer is useful and what reaches the user | Application |
 
-Dynamic delegation can help when the required subtasks vary or independent work needs separate contexts. A generate/evaluate/revise loop can help when a clear rubric produces measurable improvements. Both need application-owned limits, failure behavior and evaluation. These are optional patterns in Anthropic's [workflow guidance](https://www.anthropic.com/engineering/building-effective-agents), not requirements for every application.
+One component should own each retry, effect, and charge. SDK retries are disabled so they cannot multiply the runtime's attempts. When adopting Small Hour, replace the existing retry/accounting owner for that path.
 
-## Keep each decision with its owner
+## Check different things at different boundaries
 
-| Decision | Small Hour supplies | Application supplies |
-| --- | --- | --- |
-| What the model sees | Fresh instruction/context loading and provider encoding | Relevant sources, audience boundaries and memory selection |
-| What may execute | Required tool selection and local parsing; optional accepted-choice requirements | Validation rules, current permission and effect implementation |
-| Whether execution continues | Precise stop handling, call/deadline limits and bounded provider retries | Limits, escalation and authorized recovery policy |
-| What may be returned | Structured-result parsing and configurable text output policy | Acceptance criteria and semantic evaluation |
-| What survives failure | Optional local receipts, model checkpoints and spending reservations | Stable operation identities, storage and reconciliation evidence |
-| What reaches a user | Optional saved-output dispatch through explicit sinks | Destination authorization, transport and receipt interpretation |
+1. **Did the model finish?** Small Hour checks the provider's stop reason. Truncation or refusal cannot pass as a completed answer.
+2. **Is the data valid?** Your parser checks tool arguments or structured output. A schema alone cannot establish permission or truth.
+3. **May this action happen?** Your application checks current records and permission where it reads, writes, or sends. Preserve validated IDs through later steps.
+4. **Is the answer good?** Use application-specific evaluations for accuracy, completeness, tone, and disclosure. A second model can help grade against a tested rubric; Small Hour does not run one automatically.
+5. **Was it delivered?** Check transport evidence. Provider acceptance, device receipt, and user receipt are different outcomes.
 
-The [core loop](../src/runtime.ts), [tool registry](../src/tools/registry.ts) and [durable components](tasks.md) enforce different boundaries. A model-selected ID must still be checked against authoritative state. A schema, prompt or trace cannot grant permission.
+The default text output policy accepts completed text. A custom `OutputPolicy` receives text and `TurnContext`, without tool receipts or the execution report. Checks needing those records belong in application code. Completed model-step replay skips the text policy; check current permission before disclosure.
 
-## Validate distinct promises
+## Add capabilities when the workflow needs them
 
-1. **Provider completion:** a terminal response permits output checks; `tool_use` permits tool dispatch. Truncation, refusal, context exhaustion, pause and unknown stops remain distinct evidence. Completion alone does not establish task success.
-2. **Structure:** structured-output turns and registered tools require application parsers. Tool parsers run synchronously before execution. Valid JSON does not prove a selected object exists or belongs to the caller; the application defines and implements those checks.
-3. **State and effects:** application code checks current records, permission and committed receipts at the effect boundary. Preserve accepted IDs and outcomes through later generation.
-4. **Meaning:** evaluate whether the final response is supported, complete and appropriate. Voice quality, factual accuracy and disclosure are separate criteria. Use representative cases and human-calibrated model graders where useful; no universal model judge is built in.
-5. **Delivery:** validate the exact saved product and current permission before sending. A rewritten response is a new candidate. Transport acceptance, device receipt and user receipt are different evidence.
+Start with one turn. Add [saved results](storage.md) for recovery, [tasks](tasks.md) for ordered work, and [tracing](tracing.md) for observation. Traces cannot authorize effects or guarantee audit records were saved.
 
-The default [text policy](../src/policy/output.ts) accepts output. A supplied `OutputPolicy` receives final text and `TurnContext`, not the execution report or tool receipts. Keep checks requiring authoritative receipts in application code. [Completed model-step replay](model-steps.md) returns the saved result without rerunning output policy; current delivery authorization therefore remains necessary.
+Routing, delegation, retrieval, memory selection, and context reduction belong to the application. Fixed workflows need no autonomous subagents. Reasoning effort guides the model; [execution limits](execution.md) and [spending controls](model-spending.md) bound its work.
 
-Code, model and human grading answer different questions. Anthropic's [evaluation guidance](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) distinguishes the execution transcript from the resulting environment state. Runtime tests with scripted responses establish mechanics; applications need semantic evaluations of the actual models, context and final outputs. Measure false rejection as well as missed errors, latency and cost before adding a live evaluator.
-
-## Bound work and preserve evidence
-
-Only the runtime retries provider calls; SDK retries are disabled. Output tokens constrain a call, while calls, hops and deadlines bound a turn. Optional spending scopes span reservations and charges across work. One call can count against several limits; admission checks them together and settlement records one charge. Applications provide prices and estimates; underestimated charges are recorded, and uncertain calls retain reservations. Reasoning effort guides model behavior rather than setting a spending ceiling. See [execution](execution.md), [providers](providers.md), the [spending sequence](model-spending.md) and the [storage ERD](storage.md#relationships-and-authority).
-
-Local receipts commit local database effects and results together. Completed model steps replay saved results. Incomplete recovery requires an initially eligible tool-free step, explicit authorization and the inspected checkpoint. Cancellation cannot undo committed effects. Delivery retries consume the saved product without regenerating it. See [local operations](local-operations.md), [model steps](model-steps.md) and [delivery](delivery.md).
-
-The runner initializes only stores needed by registered step kinds. [Durable storage diagrams](storage.md) show the selected stores and record relationships. Lifecycle timestamps describe persisted changes; they never authorize recovery or establish a remote outcome.
-
-Context selection belongs to the application; the runtime adds no transcript archive, automatic retrieval or compaction. Cache reuse optimizes matching input and cannot establish memory or truth. Preserve necessary facts when reducing context, as discussed in Anthropic's [context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) and [caching guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
-
-[Tracing](tracing.md) connects attempts, tools and checks while leaving capture, storage and access to the application. Trace handoff is observational, not proof of persistence or delivery. Required audit-before-effect controls need a separate enforcement contract.
-
-## Adopt one boundary at a time
-
-Start with one stable model operation and preserve its input, output, state validation and failure contract. Replace its existing provider/retry owner rather than nesting execution loops. Choose one spending authority. Evaluate optional durable components separately: existing workers, transaction boundaries and delivery identities do not become compatible merely because their concepts have similar names. Test restart, partial failure, changed permission and exact saved-output reuse before expanding adoption.
+Test realistic inputs, denied access, interruption, uncertain effects, changed permissions, and reuse of exact saved results. Scripted model tests establish mechanics; evaluate actual model answers separately. Preserve compatible workflow handlers and records through upgrades.

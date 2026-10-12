@@ -1,34 +1,36 @@
-# Local operations
+# Save a database change once
 
-Import `SqliteOperationStore` from `small-hour/durable/sqlite`, supply an existing synchronous connection, and call `initialize()` to create `small_hour_operation_receipts`. The structural connection interface supports `node:sqlite` and `better-sqlite3`; no driver or connection is created by the package.
+Use `SqliteOperationStore` when a repeated request must return the original result without repeating a committed database change.
 
-## API
+For example, your app marks a document as processed. Small Hour saves that change and its **receipt** together. The receipt identifies the operation and preserves its result.
 
-| Method | Result |
+Import the store from `small-hour/durable/sqlite`, supply an existing synchronous SQLite connection, and call `initialize()`. The connection interface supports `node:sqlite` and `better-sqlite3`; Small Hour opens no connection.
+
+## Identity and results
+
+| Method | Behavior |
 | --- | --- |
-| `commit(request, { execute, parseResult })` | Executes local work and returns `{ receipt, replayed }`. A completed duplicate returns its original receipt. |
-| `find(request, parseResult)` | Reads a validated receipt without execution, or returns `undefined`. |
+| `commit(request, { execute, parseResult })` | Run new work or reuse its receipt. Returns `{ receipt, replayed }`. |
+| `find(request, parseResult)` | Read a validated receipt without execution, or return `undefined`. |
 
-`OperationRequest` contains nonempty `scope`, `id`, `kind`, `version`, and JSON `input`. `(scope, id)` is bound to the exact contract. Conflicting reuse throws `contract_conflict` before execution.
+`request` supplies nonempty `scope`, `id`, `kind`, `version`, and JSON `input`. Together, scope and ID identify the operation. Reusing that identity with changed input, kind, or version raises `contract_conflict` before execution.
 
-Receipts include [lifecycle timestamps](storage.md#lifecycle-timestamps). Completed replay returns the original times. The optional constructor argument `{ now }` supplies the millisecond clock.
+Inputs/results must be plain JSON: finite numbers, strings, booleans, null, dense arrays, and plain objects. Object-key order is insignificant; array order matters. There is no automatic size limit or truncation.
 
-Inputs and results accept plain JSON: finite numbers, strings, booleans, null, dense arrays, and plain data objects. Unsupported values fail. Object-key order is insignificant; array order and values remain exact. No size limit or truncation policy is imposed.
+`parseResult` validates both new and saved results synchronously. It must preserve their exact JSON values. Invalid new results raise `invalid_result`; invalid saved receipts raise `invalid_receipt`. Neither authorizes repeating the effect.
 
-`parseResult` validates new and replayed results synchronously and preserves their JSON values. It cannot substitute IDs or reinterpret decisions. Invalid new results throw `invalid_result`; invalid saved receipts throw `invalid_receipt`. Neither permits replaying the effect under that identity.
+## What commits together?
 
-## Atomic boundary
+`commit()` reserves the identity and calls `execute(database)` inside a SQLite savepoint. Database changes, the result, and any [enqueued delivery](delivery.md) on that same connection commit or roll back together. Concurrent duplicates serialize through SQLite.
 
-`commit()` opens a savepoint and reserves the identity before calling `execute(database)`. Application mutations, a replayable result, and any [staged output](delivery.md) use the same connection and transaction. They commit or roll back together. Concurrent duplicates serialize through SQLite.
+If your app already opened a transaction, **its final commit still controls everything**. A returned receipt remains provisional until then; the same connection can see provisional work.
 
-An existing outer transaction controls final commit. Released savepoints and returned receipts remain provisional until that commit; `find()` on the same connection can see provisional work.
+Executors and parsers must be synchronous. Keep model calls, sends, filesystem writes, and transaction-control statements outside them. A database rollback cannot undo external work. Async callbacks are rejected; rollback cannot stop a promise that already started.
 
-Executors and parsers must be synchronous. Only participating database writes are atomic. Model calls, filesystem writes, sends, and transaction-control statements must remain outside executors. Async functions are rejected; returned promises cause rollback but cannot cancel already-started continuations. The receipt table and `small_hour_operation` savepoint are reserved.
+The receipt table and `small_hour_operation` savepoint are reserved for Small Hour. Storage/busy errors propagate without retries.
 
-Storage and busy errors propagate without retries. An unconfirmed rollback preserves the original error. Connection durability, lifetime, and busy timeout remain application responsibilities.
+## After a crash
 
-## Recovery and retention
+Committed work has its receipt. Uncommitted database work can run again. A receipt proves the local result; it does not prove a remote effect or current permission to disclose it.
 
-A crash leaves either the committed effect and receipt or neither. An uncommitted local operation can run again. The receipt stores the scoped identity, kind, version, and result; it does not establish a remote outcome or current permission to disclose it.
-
-Applications authenticate identities, authorize effects and result disclosure, and retain receipts throughout the duplicate-request window. Deletion removes protection. Initialization performs no application migration or backfill. Incompatible contracts require an explicit migration or new identity with a justified recovery decision. See [storage and access](security.md).
+Your app checks permission and keeps receipts throughout the duplicate-request window. Deleting them removes protection. Use [timestamps](storage-schema.md#lifecycle-timestamps) for record history, and follow [upgrade requirements](releases.md#0100) for existing data.

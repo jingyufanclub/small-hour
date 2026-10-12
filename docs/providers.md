@@ -1,78 +1,65 @@
-# Providers
+# Choose a model provider
 
-| Adapter | Import | Protocol |
+A provider adapter translates Small Hour's calls into a provider's API. Supply the model you want; verify that your account and model support the features you enable.
+
+| Adapter | Import path | API |
 | --- | --- | --- |
-| `AnthropicProvider` | `small-hour/providers/anthropic` | Anthropic Messages |
-| `OpenAIProvider` | `small-hour/providers/openai` | OpenAI Responses |
+| `AnthropicProvider` | `small-hour/providers/anthropic` | Messages |
+| `OpenAIProvider` | `small-hour/providers/openai` | Responses |
 | `OpenAICompatibleProvider` | `small-hour/providers/openai-compatible` | Chat Completions |
 
-Adapters translate messages, tools, reasoning, stop reasons, and usage. Configure a supported model and trusted endpoint. Anthropic and OpenAI use their official SDKs; the compatibility adapter uses direct HTTP. The runtime owns retries and disables SDK retries, including for injected Anthropic clients. Each adapter requests redirect rejection. Application-supplied clients and fetch implementations remain trusted code and must honor request options.
-
-Anthropic and OpenAI Responses support bounded [image input](images.md); choose a vision-capable model. The compatibility adapter rejects images before admission or HTTP. Image capability is explicit for custom providers; absence does not grant support.
+Anthropic and OpenAI use official SDKs. The compatible adapter uses HTTP. Small Hour owns retries; SDK retries are disabled. All adapters request redirect rejection. Custom clients/fetch implementations are trusted application code and must honor these options.
 
 ## Anthropic
 
-Configure the model and credentials. Structured output uses [`output_config.format`](https://platform.claude.com/docs/en/build-with-claude/structured-outputs) with the supplied schema unchanged. Provider schema support and the application parser both apply.
-
-By default, the adapter constructs the official SDK with a fixed `https://api.anthropic.com` endpoint and a nonblank `apiKey` or `ANTHROPIC_API_KEY`. An explicit blank key fails instead of falling back. Ambient endpoint, bearer-token, profile/configuration and logging settings do not select the connection; SDK logging is off. A nonblank `ANTHROPIC_CUSTOM_HEADERS` fails construction, so extra headers cannot silently replace the selected credentials or add context.
-
-For an application-owned endpoint, authentication scheme, headers or SDK logging, explicitly supply `options.client`. The adapter uses that client unchanged; the application must review its effective configuration before sending private data. Every Messages request still sets `maxRetries: 0` and `fetchOptions.redirect: "error"`, overriding ordinary SDK defaults. Native fetch rejects redirects before forwarding input or credentials. Custom clients or fetch implementations can ignore these controls and are not sandboxed. See the [upgrade guidance](releases.md#090).
-
-For models supporting sampling controls, set optional `temperature` from 0 to 1 on `AnthropicProvider`. Explicit zero is preserved; omission leaves the provider default unchanged. The adapter snapshots the value and rejects combining it with adaptive or manual thinking. Model-specific support remains the application's responsibility. Include this setting in durable workflow revisions.
-
-For models supporting adaptive thinking, configure it explicitly on the adapter:
-
 ```ts
+import { AnthropicProvider } from "small-hour/providers/anthropic";
+
 const provider = new AnthropicProvider({
   model,
   thinking: { type: "adaptive", effort: "medium" },
 });
 ```
 
-Adaptive mode uses `maxTokens` as the total per-call output ceiling, including thinking. Effort is optional soft guidance, not a token or spending limit; supported levels depend on the selected model. Small Hour does not infer capabilities from model names or choose effort automatically. The adapter snapshots its thinking configuration when constructed. Structured-output schemas and effort are sent together.
+Choose a model supporting adaptive thinking for this example; omit `thinking` to leave it unconfigured. Credentials use explicit `apiKey` or `ANTHROPIC_API_KEY`; a blank explicit key fails.
 
-Do not combine adaptive mode with a turn's `thinking.budgetTokens`; the runtime rejects that combination before context loading or model admission. Without adapter thinking configuration, requests retain their existing behavior: a manual turn budget sends `thinking.type: "enabled"` and adds that budget to `maxTokens` for the combined output ceiling. Choose a model that supports the requested mode. See [Anthropic thinking](https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost).
+The managed client fixes `https://api.anthropic.com` and disables SDK logging. Ambient endpoint, bearer-token, or profile settings do not select the connection. Nonblank `ANTHROPIC_CUSTOM_HEADERS` fails construction. Custom endpoints/authentication require an explicit app-owned `client`; review its credentials, headers, logging, and redirects.
 
-Native signed thinking and other opaque blocks are echoed unchanged within the turn and excluded from final text. Spending quotes must cover the full output allowance and input costs. Bind model, thinking mode, effort and pricing revisions into the application's immutable [model-step contract](model-steps.md); adapter settings are not fingerprinted automatically.
+Adaptive thinking shares the `maxTokens` output ceiling. Effort guides reasoning; it is not a money limit. Manual turn-level `thinking.budgetTokens` instead adds that budget to `maxTokens`. Never combine manual and adaptive modes.
+
+Optional `temperature` accepts 0–1 on supporting models; explicit zero is preserved. It cannot combine with thinking.
 
 ## OpenAI
 
-Uses the official `openai` SDK for [`POST /v1/responses`](https://developers.openai.com/api/docs/guides/function-calling) with `store: false` and `truncation: "disabled"`. The endpoint is fixed to `https://api.openai.com/v1`; SDK organization, project, endpoint and logging environment defaults do not override the adapter. Credentials come from `apiKey` or `OPENAI_API_KEY`. It supplies no conversation ID or previous-response lookup. This request setting does not describe every provider retention policy.
-
-Native output items preserve reasoning, exact call IDs, and assistant phases within the tool loop. Commentary-phase text is excluded from final output. Opaque provider history must remain unchanged and cannot be combined with another provider's history; Small Hour does not retain it across turns.
-
-Schemas are sent unchanged. Strict schemas must satisfy provider requirements. `maxTokens` becomes `max_output_tokens`, including reasoning. Use `reasoningEffort` on supported models; `thinking.budgetTokens` is rejected before admission because it has no exact equivalent.
-
-For example, `new OpenAIProvider({ model: "gpt-5.6-luna", reasoningEffort: "low" })` uses the existing adapter. [Luna supports](https://developers.openai.com/api/docs/models/gpt-5.6-luna) `none`, `low`, `medium`, `high`, `xhigh` and `max`; `minimal` remains available for other models that support it. Effort guides reasoning rather than capping spending. An exhausted output allowance fails as incomplete; it does not authorize another call automatically. Keep model, effort and pricing in the application's workflow revision. Account access and task quality require live verification with the selected model.
-
-## Structured validation
-
-The API receives a JSON schema; the runtime checks the terminal outcome, parses JSON and invokes the application's required `structuredOutput.parse` callback. SDK TypeScript types do not validate model output at runtime. OpenAI's [Zod parsing helpers](https://developers.openai.com/api/docs/guides/structured-outputs) combine schema conversion and parsing for direct SDK callers; Small Hour keeps acceptance in the common runtime for every provider.
-
-Applications can use a schema library instead of handwritten field checks. For example, with an application-installed Zod 4 dependency:
-
 ```ts
-import { z } from "zod";
+import { OpenAIProvider } from "small-hour/providers/openai";
 
-const Result = z.strictObject({ selectedId: z.string() });
-const structuredOutput = {
-  schema: z.toJSONSchema(Result),
-  parse: (value: unknown) => Result.parse(value),
-};
+const provider = new OpenAIProvider({ model, reasoningEffort: "low" });
 ```
 
-Shape validation does not establish that an ID exists, facts are true or an action is authorized. Add those checks in the application parser or effect boundary. Rejected output does not trigger automatic repair calls.
+Credentials use `apiKey` or `OPENAI_API_KEY`. The managed endpoint is `https://api.openai.com/v1`; environment settings cannot override endpoint, organization, project, or logging.
+
+Requests set `store: false` and `truncation: "disabled"`, without conversation lookup. This does not describe every provider retention policy.
+
+`maxTokens` becomes `max_output_tokens`, including reasoning. Choose an effort supported by the model. Manual thinking budgets are rejected before admission.
 
 ## Compatible endpoints
 
-Supply an explicit `baseURL`, normally ending in `/v1`; requests target `/chat/completions`. Credentials come only from the explicit `apiKey`. No cloud endpoint, credential, model, or fallback is selected automatically. Model loading and serving remain external.
+```ts
+import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
 
-Text is enabled by default. Tools and `response_format.json_schema` require explicit capability settings verified against the selected server/model. Unsupported tools, required-choice settings, structured output, and thinking budgets fail before admission. `maxTokens` is sent as `max_tokens`.
+const provider = new OpenAICompatibleProvider({
+  model, baseURL, apiKey,
+  capabilities: { tools: true, structuredOutput: true },
+});
+```
 
-The adapter does not recover tool calls from prose or repair invalid JSON with another model call. Application parsers and tool allowlists still enforce acceptance after a response.
+Supply your server's `baseURL`, normally ending in `/v1`. Only explicit credentials are used. No server, model, or fallback is selected automatically.
 
-## Failures and usage
+Text works by default. Enable the shown capabilities only after verifying server/model support. Images and thinking budgets are unsupported. `maxTokens` becomes `max_tokens`.
 
-Refusals and filtering throw `provider_refused` or `provider_filtered` with the partial report. Incomplete or malformed responses cannot authorize tool execution or accepted output. HTTP 4xx errors other than 408 establish rejection; server and connection failures retain uncertainty.
+## Shared behavior
 
-Missing or invalid usage remains unknown while valid output and request IDs are preserved. Reported cached input is separated from fresh input; output usage includes reasoning where the provider reports it in the total. Accounting units and prices are application policy.
+Anthropic and OpenAI support [images](images.md) with compatible models. Schemas are sent unchanged; Small Hour runs your [parser](embedding.md#structured-results) afterward. SDK types do not validate actual output.
+
+Native reasoning and call IDs stay intact inside the tool exchange; provider history is not retained across turns. Refused, filtered, malformed, or incomplete responses cannot authorize accepted output or tools. Missing usage remains unknown. Bind provider settings and prices to saved workflow versions.

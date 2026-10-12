@@ -1,45 +1,43 @@
-# Tasks
+# Run an ordered workflow
 
-`SqliteTaskRunner` executes fixed workflows using an application-supplied synchronous SQLite connection. Construct it with workflow definitions and `{ leaseMs, now? }`, then call `initialize()`. Initialization creates or upgrades `small_hour_tasks`, its indexes, and only the evidence stores required by registered step kinds. Local/model workflows need no delivery storage. Spending is initialized separately. No polling loop starts. See [store selection and the ERD](storage.md).
+Use `SqliteTaskRunner` when a request has several fixed steps that must survive interruption. For example: save a database change, ask a model to analyze it, then save the result.
 
-## Definitions and submission
+Your app defines and submits tasks and decides when to call the runner. **Small Hour starts no polling loop or worker.**
 
-A workflow specifies `kind`, `version`, unique ordered steps, and synchronous `authorize(context)`:
+## Define and submit
+
+Construct the runner with your synchronous SQLite connection, workflow definitions, and `{ leaseMs, now? }`. Call `initialize()`; it prepares the task table and only the stores needed by registered step types. Initialize spending separately.
+
+A workflow has `kind`, `version`, ordered unique step IDs, and synchronous `authorize(context)`.
 
 | Step | Callback |
 | --- | --- |
-| `local` | Synchronous `execute(database, context)` and JSON-preserving `parseResult(value)`. |
-| `model` | Synchronous `prepare(context)` returning `{ runtime, input }`; optional initial `recovery` contract. |
-| `delivery` | A consumer-supplied sink; must be the workflow's only step. See [delivery](delivery.md). |
+| `local` | Synchronous SQL `execute(database, context)` and JSON-preserving `parseResult`. |
+| `model` | Synchronous `prepare(context)` returns `{ runtime, input }`. |
+| `delivery` | App-supplied sending function; must be the only step. See [delivery](delivery.md). |
 
-Local executors perform synchronous SQL work only. See [local operations](local-operations.md).
+Context includes the task, step ID, preceding results, cancellation signal, and `assertActive()`. Preparation, parsing, authorization, and retry selection must have no effects.
 
-Context includes the submitted task, `stepId`, detached preceding results, signal, and `assertActive()`. Preparation, validation, authorization, and retry selection must be pure. Version changed semantics or closure configuration; model replay must reconstruct the original turn contract.
+`enqueue(request, { concurrencyScope, dueAt, maxAttempts })` saves an [operation identity](local-operations.md#identity-and-results), fixed step definition, and schedule. Exact duplicates return existing state; changes conflict. Enqueue can share a local transaction and remains provisional until it commits.
 
-`enqueue(request, { concurrencyScope, dueAt, maxAttempts })` binds an `OperationRequest` to an immutable manifest and initial schedule. Exact duplicates return existing state; conflicts fail. Enqueue uses a savepoint and may share a local transaction. Its result remains provisional until outer commit. Claiming requires an independent transaction.
+## Run work
 
-## Execution and claims
+`runNext({ signal? })` claims at most one eligible task, runs it, and returns inspected state with any transient `error`. It returns `undefined` when nothing is eligible. Unknown workflow versions are skipped; keep old definitions while their tasks remain.
 
-Each `runNext({ signal? })` claims at most one due or expired task for a supported version, ordered by due time and scoped identity. Unknown versions are skipped; changed manifests fail before claim. It returns inspected state with an optional transient `error`, or `undefined` when no task is eligible. Already-aborted calls do no work.
+A **claim** gives one worker temporary ownership. Its **lease** expires after `leaseMs`. A **concurrency scope** groups work that must not overlap: running or uncertain work holds its scope.
 
-Each claim consumes an attempt, including recovery and permission deferral. One running or uncertain task occupies its concurrency scope. Deferral does not reserve ordering. Workers need consistent nonnegative millisecond clocks.
+Every claim consumes an attempt, including permission deferral and recovery. Permission returns `allow`, `rejected` with a reason, or `deferred` with a reason/due time.
 
-Completed steps replay receipts. New steps receive preceding results and current permission: `allow`, `rejected` with reason, or `deferred` with reason/due time. Local effects, receipts, and before/after guards commit together. Model guards preserve progress before stopping. Rejected model output ends the task as rejected.
+Completed steps reuse saved results. New steps recheck permission; rejected model output ends the task as rejected. Deferral does not reserve ordering.
 
-Leases renew between steps. Set `leaseMs` above the longest step; no heartbeat extends blocked work. A stale worker throws `claim_lost` and cannot commit subsequent local steps or finalize the task. External effects need their own authorization and fencing.
+Leases renew between steps. Set the lease longer than the longest step; blocked work has no heartbeat. Stale workers cannot commit subsequent local steps or finalize the task. Remote effects need separate duplicate protection.
 
-## Recovery
+## Inspect, cancel, recover
 
-`inspect(key)` returns lifecycle, reasons, attempts, cancellation, resolutions, and step evidence. Task state and saved step records include [lifecycle timestamps](storage.md#lifecycle-timestamps); completed local steps expose `receipt` alongside `result`. `completed` requires accepted step results; device/user receipt still requires delivery evidence.
+- `inspect(key)`: progress, reasons, attempts, timestamps, and step evidence. Completed local steps include their receipt.
+- `cancel(key, reason)`: stop queued/deferred work or request cancellation of running/uncertain work. Completed effects remain.
+- `retry(error, context)`: optional scheduling of rolled-back local work within its attempt limit.
+- `retryModel(...)`: explicit [recovery of eligible model work](model-recovery.md#through-the-task-runner); unfinished model work never repeats automatically.
+- `resolve(key, { status, reason, evidence })`: close verified uncertain work as failed/cancelled without replay or refund.
 
-`retry(error, context)` may return `{ dueAt, reason }` only for rolled-back local attempts within the limit. Incomplete model work is never replayed automatically. Provider retries remain in the core.
-
-A model step may initially opt in with `recovery: { sideEffectFree: true, maxAttempts, maxModelCalls }`. Its turn must be tool-free and its preparation, context sources and output checks must have no effects. The limits become part of the immutable task manifest. Existing steps without this contract cannot gain recovery later.
-
-After inspecting an uncertain task, the application may call `retryModel(key, { stepId, action: "retry", checkpoint: step.model.checkpoint, reason, evidence }, { signal? })`. The decision must refer to the first unfinished model step and its exact current evidence. Recovery consumes a task claim and a model attempt, rechecks current authorization and cancellation, and preserves prior local receipts. Each model attempt has separate reports and spending records; the model call limit spans all attempts. A completed result is reused without regeneration. See [model steps](model-steps.md) for spending reconciliation and recovery eligibility.
-
-`cancel(key, reason)` immediately stops queued/deferred tasks and records requests for running or uncertain tasks. Committed effects remain. Aborted workers defer safe unstarted work; unknown effects retain the scope.
-
-`resolve(key, { status: "failed" | "cancelled", reason, evidence })` closes uncertain work after verification that old effects cannot continue unexpectedly. Exact repeats are safe. It does not reset steps, replay effects, or refund spending.
-
-Storage errors propagate. `rollback_failed` requires restoring/replacing the connection before recovery. Retain task/evidence rows and compatible handlers during upgrades or stop execution during rollback; initialization performs no backfill. See [storage and access](security.md).
+Storage errors propagate. Replace or restore the connection after `rollback_failed`. Retain evidence and compatible handlers through [upgrades](releases.md).

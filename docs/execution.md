@@ -1,44 +1,42 @@
 # Execution limits
 
-The runtime owns provider retries and the deadline covering context loading, calls, retry waits, tools, validation, accounting, and checkpoints. Provider adapters must disable internal retries.
+Limits stop an individual request from running indefinitely. A **turn** is the whole exchange; a **hop** is one model response and any requested tools. A failed provider request may retry within that hop, using another call.
 
-| Option | Default | Effect |
+## Defaults
+
+| Option | Default | Applies to |
 | --- | --- | --- |
-| `timeoutMs` | 30,000 | Deadline for the complete turn. |
-| `maxHops` | 6 | Model/tool-loop bound. |
-| `retry.attempts` | 3 | Maximum provider attempts per hop. |
-| `maxModelCalls` | `maxHops × retry.attempts` | Total attempts across all hops and retries. |
-| `maxTokens` | 512 | Provider-specific output allowance. |
-| `maxToolResultCharacters` | 4,000 | JSON-encoded tool-result size. |
+| `timeoutMs` | 30,000 | The whole turn, including context loading, callbacks, and waits. |
+| `maxHops` | 6 | Model/tool exchanges. |
+| `retry.attempts` | 3 | Provider attempts per hop. |
+| `maxModelCalls` | `maxHops × retry.attempts` | All provider attempts in the turn. |
+| `maxTokens` | 512 | Each call's output allowance; [reasoning rules differ](providers.md). |
+| `maxToolResultCharacters` | 4,000 | Each JSON-encoded tool result. |
 
-Tools require capacity for a following model call; the final hop cannot execute tools. Oversized results fail unless `toolResultOverflow` supplies a bounded replacement. The runtime never silently truncates them. Token and reasoning semantics are documented per [provider](providers.md).
+Choose limits for your workflow. A turn can override `maxTokens`; other limits are runtime options. Tools require room for a following model call, so the final hop cannot execute tools.
 
-## Admission and accounting
+Oversized results fail; `toolResultOverflow(value, context)` can supply one bounded replacement. Small Hour never silently clips results. Preserve required IDs and facts.
 
-Configure `modelCalls.admit(context)` to authorize each provider attempt. It must return exactly `true`. Context includes a unique `callId`, agent/turn IDs, provider/model, attempt, hop, and token limits. Denial or a callback failure ends the turn without retrying the hook.
+## What happens at the limit?
 
-`modelCalls.record(call, context)` receives the provider outcome and available usage/request ID before tools execute or the loop continues:
+Small Hour stops further work and throws `RuntimeError` with available progress. A truncated answer is not accepted. Previous effects and charges remain. Your app decides whether to show an error, inspect saved work, or authorize another attempt.
 
-| Status | Meaning |
-| --- | --- |
-| `responded` | The provider returned; output validation may still fail. |
-| `rejected` | Definite provider rejection. |
-| `unknown` | The outcome is uncertain. Missing usage cannot establish zero cost. |
+Only a `tool_use` stop allows tools. Final output needs `end_turn` or `stop_sequence`, then the configured output checks. Refusal, filtering, token/context exhaustion, pause, and unknown endings remain distinct; they authorize no continuation or partial answer.
 
-Accounting failure stops further calls. Reports retain `unrecorded` until the accounting callback finishes. `usage.record` remains available for successful-response telemetry; avoid charging the same call through both hooks. The optional [spending store](model-spending.md) supplies persistent reservation and settlement.
+## Money and accounting
 
-Responded calls retain `stop: { reason, nativeReason? }` before checkpointing and accounting. `reason` uses the same provider-neutral values as `ProviderResponse.stopReason`; `context_limit` means context exhaustion and `pause` means unsupported provider continuation. Anthropic's original `stop_reason` is preserved as `nativeReason` when present. Other adapters and custom providers can omit native evidence. Only `tool_use` permits tool dispatch; final output requires `end_turn` or `stop_sequence` and the usual output checks. Refusal, truncation, pause and unknown stops authorize no extra calls or partial output.
+Call counts are not money limits. Use [spending hooks](model-spending.md) for monetary allowances.
 
-A known stop does not prove known cost: a refused response can still have chargeable usage, and missing usage retains uncertainty. Older saved calls can lack `stop`; absence means unavailable evidence. This metadata does not retain provider content or create a continuation policy.
+- `modelCalls.admit(context)` must return exactly `true` before each attempt. Denial or callback failure stops dispatch.
+- `modelCalls.record(call, context)` records the outcome before tools or another call. Accounting failure stops continuation.
+- `usage.record` is successful-response telemetry; do not charge the same call twice.
 
-`ModelCallRecord` is a discriminated union: only `responded` calls can carry stop evidence. Consumer record extensions should use an intersection type. Invalid stop metadata from a custom provider stops acceptance after preserving valid usage and running accounting.
+Call records distinguish `responded`, `rejected`, and `unknown`. Responded calls retain normalized stop evidence and available native reasons. Missing usage does not mean free. Reports remain `unrecorded` until accounting finishes. Separate calls made inside your tools or loaders need their own budget controls.
 
-A call limit does not establish a monetary ceiling. Applications supply prices, conservative reservation estimates, and stable budget scopes. Model calls inside tools or context loaders need their own admission boundary.
+## Cancellation and saved progress
 
-## Cancellation and reports
+The cancellation signal and deadline cover the whole turn. Callbacks must cooperate with the signal; synchronous blocking code cannot be interrupted. An already-started request or effect may finish later. Cancellation starts no new accounting callback, so check durable records for pending reservations.
 
-The turn signal combines the supplied cancellation signal with its deadline and is aborted when execution finishes. Failed context loading cancels its pending sibling. Cooperative callbacks can stop; blocking synchronous code cannot be forcibly interrupted. Elapsed time is checked before subsequent work or success.
+Reports are snapshots; they do not receive late results. `not_started` proves the provider was not invoked, but an admission reservation may still exist.
 
-Cancellation starts no new accounting callback. An in-flight admission, provider request, tool, or accounting callback can still complete. Reports are detached snapshots and do not gain late results. Reconcile pending reservations and external effects through durable evidence; `not_started` proves no provider invocation, but admission may still need settlement.
-
-`runtime.turn(input, { checkpoint(report) })` exposes an awaited persistence boundary. Observers participate in the deadline, must not start effects or retries, and fail the turn with `checkpoint_failed` when they throw. [Model steps](model-steps.md) use this boundary to preserve progress.
+`turn(input, { checkpoint(report) })` awaits your progress-saving callback. It shares the deadline and must not start effects or retries. Failure raises `checkpoint_failed`. [Model steps](model-steps.md) use this to save progress automatically.
