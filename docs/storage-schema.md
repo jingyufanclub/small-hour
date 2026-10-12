@@ -40,7 +40,7 @@ erDiagram
     }
     small_hour_model_spend {
         TEXT call_id PK
-        TEXT quote_json "estimated cost and budgets"
+        TEXT quote_json "quote or explicit denial"
         INTEGER charged_amount "null while unresolved"
     }
     small_hour_model_spend_scopes {
@@ -49,7 +49,7 @@ erDiagram
     }
 ```
 
-Enable SQLite foreign-key checks. Budget memberships point to one call; they have no independent balance. Keep both tables together. Spending call IDs also appear in model reports when accounting is configured.
+Enable SQLite foreign-key checks. Budget memberships point to one call; they have no independent balance. Keep both tables together. `quote_json` stores the admission decision: a cost quote or explicit denial with scopes, reason, and evidence. Denials have zero exposure. Spending call IDs also appear in model reports.
 
 ## Lifecycle timestamps
 

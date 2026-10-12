@@ -16,7 +16,7 @@ Update workflow versions when changing selection or validation. Completed replay
 
 Spending can reserve against several budgets. Single-scope quotes remain valid; `ModelSpendQuote` is a union. Narrow `quote.scopes` when reading it and use a type intersection when extending it.
 
-The scope migration requires SQLite 3.35+. It validates saved calls, creates budget memberships, and removes the old parent `scope` column while preserving charges, quotes, and uncertainty. It runs in an independent transaction and imports no external history. Stop callers and back up first. Older writers cannot safely use this layout; follow current rollback rules.
+The scope migration requires SQLite 3.35+. It validates saved calls, creates budget memberships, and removes the old parent `scope` column while preserving charges, quotes, and uncertainty. Current initialization uses a savepoint and imports no external history. Stop callers and back up first. Older writers cannot safely use this layout; follow current rollback rules.
 
 ## 0.6.0–0.6.1
 

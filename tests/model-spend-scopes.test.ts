@@ -155,7 +155,9 @@ test("migration preserves single-scope history and blocks legacy admission while
   legacy.spend.initialize(); legacy.spend.initialize();
   assert.deepEqual(legacy.db.prepare("SELECT context_json, quote_json, record_json FROM small_hour_model_spend WHERE call_id = 'accepted'").get(), prior);
   assert.equal(legacy.spend.inspectBudget(limits[0].scope).totalAmount, 13);
-  assert.equal(legacy.spend.inspect("accepted")?.quote.scope, limits[0].scope);
+  const accepted = legacy.spend.inspect("accepted");
+  assert.ok(accepted?.quote);
+  assert.equal(accepted.quote.scope, limits[0].scope);
   assert.equal(legacy.spend.inspect("unknown")?.status, "unknown");
   assert.throws(() => legacy.db.prepare("SELECT SUM(reserved_amount) FROM small_hour_model_spend WHERE scope = ?").get(limits[0].scope), /no such column/);
   let calls = 0;

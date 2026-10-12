@@ -3,7 +3,7 @@ import { SmallHourRuntime, EmptyMemorySource, StaticPersonaSource, IMAGE_INPUT_L
 import { AnthropicProvider, type AnthropicProviderOptions } from "small-hour/providers/anthropic";
 import { OpenAIProvider, type OpenAIProviderOptions } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider, type OpenAICompatibleProviderOptions } from "small-hour/providers/openai-compatible";
-import { SqliteModelStepStore, SqliteTaskRunner, SqliteModelSpendStore, type ModelSpendPolicy, type ModelSpendScope, type ModelRecoveryContract, type ModelStepOptions,
+import { SqliteModelStepStore, SqliteTaskRunner, SqliteModelSpendStore, type ModelSpendPolicy, type ModelSpendScope, type ModelSpendDenial, type ModelSpendDecision, type ModelRecoveryContract, type ModelStepOptions,
   type ModelStepRecoveryDecision, type ModelStepState, type SqliteDatabase, type TaskWorkflow, type DurableClockOptions, type RecordTimestamps } from "small-hour/durable/sqlite";
 
 const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture-only", thinking: { type: "adaptive", effort: "medium" } };
@@ -40,6 +40,20 @@ export async function verifyPublicTypes(database: SqliteDatabase, state: ModelSt
   const budgets: ModelSpendScope[] = [{ scope: "application", limit: 100 }, { scope: "account", limit: 10 }];
   const spending: ModelSpendPolicy = { quote: () => ({ scopes: budgets, amount: 5, pricing: {} }), charge: () => 3 };
   new SqliteModelSpendStore(database).hooks(spending);
+  const denied: ModelSpendDenial = { denied: true, scopes: ["application"], reason: "unknown_model", evidence: "prices-v1" };
+  const admission: ModelSpendDecision = denied;
+  const spend = new SqliteModelSpendStore(database);
+  spend.hooks({ quote: () => admission, charge: () => 0 });
+  const saved = spend.inspect("call");
+  if (saved?.quote === null) {
+    const reason: string = saved.denial.reason;
+    const charge: 0 = saved.chargedAmount;
+    const status: "denied" = saved.status;
+    void [reason, charge, status];
+  } else if (saved) {
+    const amount: number = saved.quote.amount;
+    void amount;
+  }
   const decision: ModelStepRecoveryDecision = { action: "retry", checkpoint: state.checkpoint, reason: "Retry selected work.", evidence: {} };
   const input = { agentId: "consumer", input: "Select item-7.", structuredOutput: {
     schema: { type: "object" }, parse: (value: unknown) => value as { selectedId: string },

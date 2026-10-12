@@ -161,6 +161,7 @@ test("adaptive calls share spending admission and completed replay preserves the
   assert.equal(requests[0].max_tokens, 16);
   assert.equal(spend.inspectBudget("app:budget").totalAmount, 20);
   const saved = spend.inspect(first.result.modelCalls[0].callId)!;
+  assert.ok(saved.quote);
   assert.equal(saved.quote.amount, 28);
   assert.equal(saved.chargedAmount, 20);
   const replay = await steps.run(request, runtime, input);

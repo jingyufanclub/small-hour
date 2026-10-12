@@ -1,20 +1,28 @@
 # Install and upgrade
 
-Requires Node.js 26.10+ with ESM imports. Install the built [0.10.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.10.0):
+Requires Node.js 26.10+ with ESM imports. Install the built [0.11.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.11.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.10.0/small-hour-0.10.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.11.0/small-hour-0.11.0.tgz
 ```
 
-Commit your application's manifest and lockfile. Later `npm ci` installs verify the recorded integrity. The release also includes `SHA256SUMS`.
+Commit your manifest and lockfile; `npm ci` verifies recorded integrity. Releases include `SHA256SUMS`.
 
-The artifact contains JavaScript and TypeScript declarations; installation needs no source build. Public npm publication is not configured. From a source checkout, pin a commit and run `nvm use`, `npm ci`, and `npm run build`.
+Artifacts contain JavaScript and TypeScript declarations. Public npm publication is not configured. Source users pin a commit and run `nvm use`, `npm ci`, and `npm run build`.
+
+## 0.11.0
+
+Spending schema initialization can join an app transaction or savepoint. Commit setup before execution; admission, settlement, and reconciliation still require independent transactions.
+
+`ModelSpendPolicy.quote` returns a quote or [explicit denial](spending-records.md#deny-before-pricing). Inspection returns `quote: null` plus `denial` for explicit denials; narrow before reading quote fields.
+
+No table migration from 0.10.0. Denials use the existing `quote_json` decision snapshot in format 3. **Upgrade all readers before writing explicit denials:** older readers reject them. Existing quoted records keep their meaning.
 
 ## 0.10.0
 
-This version adds record timestamps and initializes only stores required by registered task steps. Completed local task steps include their receipt. See [storage](storage.md) and its [schema reference](storage-schema.md).
+This version adds [timestamps](storage-schema.md#lifecycle-timestamps), initializes stores required by registered steps, and includes receipts with completed local steps.
 
-**Existing databases require an upgrade.** Fresh databases can initialize normally.
+**Databases predating 0.10.0 require an upgrade.**
 
 1. Stop users of the affected stores, including in-flight model and delivery work.
 2. Take a verified database backup.
@@ -48,4 +56,4 @@ Run `npm run check` and `npm run check:package` on the candidate. The package ch
 
 Use `npm run check:package -- --out-dir /absolute/release-directory` to retain verified files. Review the version and exact commit, tag it, and attach that artifact and checksum. Applications upgrade separately.
 
-These checks use controlled model responses. Live model quality and actual application integration need separate verification.
+Checks use controlled responses; live model quality and application integration need separate verification.
