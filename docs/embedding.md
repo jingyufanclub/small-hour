@@ -8,9 +8,43 @@
 
 `input` accepts a string or ordered text/image blocks. Explicit input is copied and frozen before loaders run; callbacks receive that selected input. Code using string methods on `context.input` must first narrow with `typeof context.input === "string"`. Selected memory is copied after loading. See [image input](images.md) for provider support, bounds and persistence.
 
-Register tools with `name`, `description`, `inputSchema`, and `execute`. Optional `parse` validates external arguments. Declare `mode: "read" | "write"`; omission defaults to write. Omitting `allowedTools` offers every registered tool; pass an explicit list to restrict a turn, or `[]` to offer no registered tools. Dispatch rejects calls to tools that were not offered. Schemas should close object inputs; application tools enforce domain rules and authorize both reads and writes.
+Register tools with `name`, `description`, `inputSchema`, a synchronous `parse`, and `execute`. The schema describes arguments to the provider; `parse` must validate them locally and return the value passed to `execute`. Small Hour requires the parser but cannot establish that an application's validator is adequate. A missing parser rejects registration; a thrown error or returned promise prevents execution. Keep parsing free of effects.
 
-Tools execute sequentially. By default, validation and read failures become tool-result errors; `toolErrorMode: "throw"` stops on all failures. A write that throws after starting always ends the turn with `tool_outcome_unknown`. Stable application operation IDs must cover duplicates arriving under different provider call IDs.
+When tools are registered, every ordinary turn requires an explicit `allowedTools` list, including `[]` to offer none. Omission fails with `tool_allowlist_required` before context loading or model admission. Invalid selections also fail before loading. A runtime with no registered tools needs no list; structured-output turns always exclude tools. Dispatch rejects tools that were not offered. Declare `mode: "read" | "write"`; omission defaults to write. Application tools authorize both reads and writes at the operation boundary.
+
+For example, with your runtime `options` and an application function `readAuthorizedRecord(agentId, id)` that checks current access:
+
+```ts
+import { ModelSafeToolError, SmallHourRuntime, ToolRegistry } from "small-hour";
+
+const tools = new ToolRegistry().register({
+  name: "read_record",
+  description: "Read an accessible record by ID.",
+  mode: "read",
+  inputSchema: {
+    type: "object", properties: { id: { type: "string" } },
+    required: ["id"], additionalProperties: false,
+  },
+  parse(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || !("id" in value) || typeof value.id !== "string" || !value.id.trim()
+      || Object.keys(value).some(key => key !== "id")) {
+      throw new ModelSafeToolError("Supply one nonempty record ID.");
+    }
+    return { id: value.id };
+  },
+  execute: ({ id }, context) => readAuthorizedRecord(context.agentId, id),
+});
+
+const runtime = new SmallHourRuntime({ ...options, tools });
+const result = await runtime.turn({
+  agentId: "example", input: "Read the selected record.", allowedTools: ["read_record"],
+});
+```
+
+Tools execute sequentially. By default, validation and read failures return `{ error: "Tool failed.", code: "tool_failed" }` to the model. Known runtime denials retain their fixed codes, such as `tool_not_allowed`. Exception messages, arbitrary error codes, causes and stacks are not forwarded. Throw `ModelSafeToolError` only for text deliberately safe for the model; its message replaces the generic text, while its optional `cause` stays private. This also applies to recoverable choice errors. Explicit tool results and captured content are not automatically redacted.
+
+`toolErrorMode: "throw"` stops on all failures. A write that throws after starting always ends the turn with `tool_outcome_unknown`, even for a safe error. Stable application operation IDs must cover duplicates arriving under different provider call IDs.
 
 `context.recordReceipt(id)` adds a reference to the report. Persist the effect and receipt through [local operations](local-operations.md) or an equivalent application boundary first. This callback does not save data.
 

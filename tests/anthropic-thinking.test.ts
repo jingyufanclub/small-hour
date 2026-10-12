@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -63,7 +64,7 @@ test("adaptive tool calls preserve signed thinking and exact tool IDs through th
   ];
   let reads = 0;
   const tools = new ToolRegistry([{ name: "read_item", description: "Read a selected item", inputSchema: {}, mode: "read",
-    execute: (input, context) => {
+    parse: parseObject, execute: (input, context) => {
       reads++;
       assert.deepEqual(input, { itemId: "item-7" });
       assert.equal(context.toolCallId, "tool-call-7");
@@ -73,7 +74,7 @@ test("adaptive tool calls preserve signed thinking and exact tool IDs through th
     { type: "thinking", thinking: "Private reasoning stays outside the answer.", signature: "signed-final" },
     { type: "text", text: "Selected item is available." },
   ])], { type: "adaptive", effort: "high" }, { tools });
-  const result = await runtime.turn({ agentId: "app", input: "Read item-7.", maxTokens: 2_048 });
+  const result = await runtime.turn({ allowedTools: ["read_item"], agentId: "app", input: "Read item-7.", maxTokens: 2_048 });
   assert.equal(reads, 1);
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1].messages[1], { role: "assistant", content: first });

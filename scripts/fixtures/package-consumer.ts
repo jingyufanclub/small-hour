@@ -1,4 +1,4 @@
-import { SmallHourRuntime, EmptyMemorySource, StaticPersonaSource, IMAGE_INPUT_LIMITS,
+import { SmallHourRuntime, EmptyMemorySource, StaticPersonaSource, IMAGE_INPUT_LIMITS, ModelSafeToolError, ToolRegistry,
   type InputContent, type ImageBlock, type ModelProvider, type ProviderStop, type TraceEvent, type TraceSummary } from "small-hour";
 import { AnthropicProvider, type AnthropicProviderOptions } from "small-hour/providers/anthropic";
 import { OpenAIProvider, type OpenAIProviderOptions } from "small-hour/providers/openai";
@@ -10,6 +10,19 @@ const anthropic: AnthropicProviderOptions = { model: "fixture", apiKey: "fixture
 const openai: OpenAIProviderOptions = { model: "fixture", apiKey: "fixture-only", reasoningEffort: "max" };
 const compatible: OpenAICompatibleProviderOptions = { model: "fixture", baseURL: "http://fixture.invalid/v1" };
 const providers: ModelProvider[] = [new AnthropicProvider(anthropic), new OpenAIProvider(openai), new OpenAICompatibleProvider(compatible)];
+const tools = new ToolRegistry().register({
+  name: "read_record", description: "Read a record", mode: "read", inputSchema: { type: "object" },
+  parse(value) {
+    if (!value || typeof value !== "object" || !("id" in value) || typeof value.id !== "string") {
+      throw new ModelSafeToolError("Supply a record ID.", { cause: new Error("private diagnostic") });
+    }
+    return { id: value.id };
+  },
+  execute: ({ id }) => ({ id }),
+});
+export const verifyToolTypes = () => new SmallHourRuntime({ tools, provider: providers[0],
+  persona: new StaticPersonaSource("Read the selected record."), memory: new EmptyMemorySource(),
+}).turn({ agentId: "consumer", input: "Read item-7.", allowedTools: ["read_record"] });
 const traces: TraceEvent[] = [];
 const runtime = new SmallHourRuntime({ provider: providers[0], persona: new StaticPersonaSource("Use the supplied ID."), memory: new EmptyMemorySource(),
   tracing: { sink: { record: event => { traces.push(event); } } } });

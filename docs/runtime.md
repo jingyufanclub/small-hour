@@ -17,18 +17,19 @@ A **provider adapter** translates this common contract into the selected service
 ```mermaid
 sequenceDiagram
     accTitle: One turn with a tool call
-    accDescr: The application supplies input and fresh context. Small Hour admits each model call and records usage before continuing. The application tool authorizes its effect. Small Hour returns the tool result to the model with its original call ID, then checks the final output.
+    accDescr: The application supplies input and an explicit tool selection. Small Hour validates that selection before loading fresh context, admits each model call and runs the required local tool parser before execution. The application tool authorizes its effect. Small Hour returns the result with its original call ID, then checks the final output.
     participant app as Application
     participant runtime as Small Hour
     participant provider as Model provider
     participant tool as Application tool
-    app->>runtime: turn({ agentId, input })
+    app->>runtime: turn({ agentId, input, allowedTools })
+    runtime->>runtime: Validate explicit tool selection
     runtime->>app: Load instructions and selected memory
     app-->>runtime: Fresh context
     runtime->>runtime: Check limits and admit call
     runtime->>provider: Input, context and tool schemas
     provider-->>runtime: Tool request, call ID and usage
-    runtime->>runtime: Record usage and check tool request
+    runtime->>runtime: Record usage, check allowlist, run parser
     runtime->>tool: Execute checked arguments
     tool->>tool: Authorize and perform the effect
     tool-->>runtime: Tool result
@@ -39,10 +40,10 @@ sequenceDiagram
     runtime-->>app: Result and execution report
 ```
 
-1. The application calls `turn()`. Small Hour copies the input and loads fresh instructions and selected memory from application sources.
+1. The application calls `turn()`. Small Hour copies the input and checks the explicit tool selection before loading fresh instructions and selected memory from application sources.
 2. Small Hour checks remaining call capacity and runs any admission hook before contacting the provider. Optional spending hooks reserve the application's estimated cost.
 3. A model response supplies content, a stop reason and available usage. Accounting runs before tools or another call. Only a `tool_use` stop permits tool dispatch.
-4. Small Hour checks the tool allowlist and supplied argument parser, then executes tools sequentially. Each application tool enforces permission at its actual effect. Results return with the original tool call IDs for the next model call.
+4. Small Hour checks the tool allowlist and runs the required synchronous argument parser, then executes tools sequentially. Invalid arguments never start execution. Each application tool enforces permission at its actual effect. Results return with the original tool call IDs for the next model call.
 5. A valid final stop allows the output policy to check the response. The application receives the result and execution report, including calls, usage, tool outcomes, accepted choices and receipt references.
 
 An optional **choice** contract preserves an accepted selection and can require it before writes. The application then authorizes each write against that selection. Schemas validate shape; they cannot establish permission or truth.
@@ -62,7 +63,7 @@ A **hop** is one pass through the model/tool loop. A failed provider request can
 
 A call count is not a money budget. Optional [spending controls](model-spending.md) use application-supplied prices and conservative estimates. Known charges are recorded even if an estimate was too low; uncertain calls keep their reservation until reconciled.
 
-Tools need capacity for a following model call. A write that fails after starting stops the turn because its effect may already exist. Cancellation cannot undo completed effects or force a non-cooperative callback to stop. Read-tool errors can instead return to the model; an output policy can return a rejected result.
+Tools need capacity for a following model call. A write that fails after starting stops the turn because its effect may already exist. Cancellation cannot undo completed effects or force a non-cooperative callback to stop. Validation and read-tool errors can return generic feedback to the model; an application can explicitly supply a safe message. See [tool error handling](embedding.md#context-and-tools). An output policy can return a rejected result.
 
 See [execution limits](execution.md) and [provider token semantics](providers.md) for defaults and exact behavior.
 

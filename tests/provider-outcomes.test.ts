@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,7 +41,7 @@ function transport(bodies: unknown[], options: Partial<RuntimeOptions> = {}) {
   } });
   const runtime = new SmallHourRuntime({ provider: new AnthropicProvider({ model: "test-model", client }),
     persona: new StaticPersonaSource("Use supplied IDs."), memory: new EmptyMemorySource(),
-    tools: new ToolRegistry([{ name: "save", description: "Save an item", inputSchema: {}, execute: () => assert.fail("unexpected tool effect") }]),
+    tools: new ToolRegistry([{ name: "save", description: "Save an item", inputSchema: {}, parse: parseObject, execute: () => assert.fail("unexpected tool effect") }]),
     retry: { attempts: 3, delayMs: () => 0, retryable: () => true }, ...options });
   return { runtime, requests };
 }
@@ -94,7 +95,7 @@ for (const stop of stops) {
     const { steps } = fixture(t);
     let effects = 0, accepted = 0;
     const { runtime, requests } = transport([message(stop.native, [{ type: "text", text: "looks complete" }, tool])], {
-      tools: new ToolRegistry([{ name: "save", description: "Save an item", inputSchema: {}, execute: () => { effects++; } }]),
+      tools: new ToolRegistry([{ name: "save", description: "Save an item", inputSchema: {}, parse: parseObject, execute: () => { effects++; } }]),
       outputPolicy: { apply: text => { accepted++; return { accepted: true, output: text }; } },
     });
     await assert.rejects(steps.run(request, runtime, input));
@@ -125,7 +126,7 @@ test("a completed local receipt remains intact when the following provider call 
   app.db.exec("CREATE TABLE saved_items (id TEXT PRIMARY KEY)");
   let effects = 0;
   const { runtime, requests } = transport([message("tool_use", [tool]), message("model_context_window_exceeded")], {
-    tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, execute: (_value, context) => {
+    tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute: (_value, context) => {
       const saved = app.operations.commit({ ...request, id: "save-item", kind: "save" }, {
         execute: db => { effects++; db.prepare("INSERT INTO saved_items VALUES ('item-7')").run(); return { itemId: "item-7" }; },
         parseResult: value => value as { itemId: string },
@@ -150,7 +151,7 @@ test("a completed local receipt remains intact when the following provider call 
 test("normal tool continuation and final output retain detached stop evidence on replay", async t => {
   const app = fixture(t);
   const { runtime, requests } = transport([message("tool_use", [tool]), message("end_turn", [{ type: "text", text: "Saved item-7." }])], {
-    tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, mode: "read", execute: () => ({ itemId: "item-7" }) }]),
+    tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, mode: "read", parse: parseObject, execute: () => ({ itemId: "item-7" }) }]),
     modelCalls: { record: call => { if (call.stop) call.stop.reason = "unknown"; } },
   });
   const first = await app.steps.run(request, runtime, input);

@@ -4,7 +4,8 @@ Model input and output are untrusted. Applications authenticate callers, select 
 
 ## Execution boundaries
 
-- Register narrow tools and validate domain inputs. Omitting `allowedTools` offers every registered tool; an explicit list restricts that turn's registered tools, and `[]` offers no registered tools. Structured-output mode offers no tools and cannot be combined with `allowedTools` or `choice`. Authorize resource reads and effects inside application tools; schemas and allowlists do not establish that permission.
+- Register narrow tools with a required synchronous argument parser. Select `allowedTools` explicitly on each turn with registered tools; omission fails before context loading or provider admission, and `[]` offers none. Structured-output mode offers no tools and cannot be combined with `allowedTools` or `choice`. Small Hour runs the parser before execution; applications own its validation rules and authorize resource reads and effects inside tools. Schemas and allowlists do not establish permission.
+- Recoverable tool and choice failures send generic text and fixed codes to the model. Only `ModelSafeToolError` exposes an application-selected message; causes and stacks are excluded. Treat exceptions retained in a terminal `RuntimeError.cause` as private. This boundary does not redact explicit tool results, inputs, memory, safe-error messages or opt-in trace content; applications control their disclosure.
 - Declare read/write modes. Choice-governed writes require an accepted choice and explicit authorization for each call. Stable operation IDs must cover repeated requests arriving under different provider IDs.
 - Validate and moderate final output for its destination. A saved result or receipt does not grant permission for new disclosure.
 - Configure context bounds, model-call limits, deadlines, token allowances, and tool-result handling. Preserve required facts when selecting context or replacing oversized results.

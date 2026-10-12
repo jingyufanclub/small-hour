@@ -13,7 +13,7 @@ Dynamic delegation can help when the required subtasks vary or independent work 
 | Decision | Small Hour supplies | Application supplies |
 | --- | --- | --- |
 | What the model sees | Fresh instruction/context loading and provider encoding | Relevant sources, audience boundaries and memory selection |
-| What may execute | Tool allowlists, argument-parser hooks and optional accepted-choice requirements | ID validation, current permission and effect implementation |
+| What may execute | Required tool selection and local parsing; optional accepted-choice requirements | Validation rules, current permission and effect implementation |
 | Whether execution continues | Precise stop handling, call/deadline limits and bounded provider retries | Limits, escalation and authorized recovery policy |
 | What may be returned | Structured-result parsing and configurable text output policy | Acceptance criteria and semantic evaluation |
 | What survives failure | Optional local receipts, model checkpoints and spending reservations | Stable operation identities, storage and reconciliation evidence |
@@ -24,7 +24,7 @@ The [core loop](../src/runtime.ts), [tool registry](../src/tools/registry.ts) an
 ## Validate distinct promises
 
 1. **Provider completion:** a terminal response permits output checks; `tool_use` permits tool dispatch. Truncation, refusal, context exhaustion, pause and unknown stops remain distinct evidence. Completion alone does not establish task success.
-2. **Structure:** a structured-output turn requires an application parser. Tool argument parsing is configurable. Valid JSON does not prove a selected object exists or belongs to the caller.
+2. **Structure:** structured-output turns and registered tools require application parsers. Tool parsers run synchronously before execution. Valid JSON does not prove a selected object exists or belongs to the caller; the application defines and implements those checks.
 3. **State and effects:** application code checks current records, permission and committed receipts at the effect boundary. Preserve accepted IDs and outcomes through later generation.
 4. **Meaning:** evaluate whether the final response is supported, complete and appropriate. Voice quality, factual accuracy and disclosure are separate criteria. Use representative cases and human-calibrated model graders where useful; no universal model judge is built in.
 5. **Delivery:** validate the exact saved product and current permission before sending. A rewritten response is a new candidate. Transport acceptance, device receipt and user receipt are different evidence.

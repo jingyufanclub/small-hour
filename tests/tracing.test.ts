@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -35,7 +36,7 @@ test("one trace joins actual model requests, parsed tool input, results, and fin
       parse: (input: any) => ({ id: input.id }), execute: (input, context) => {
         callbackTraces.push(context.trace); context.recordReceipt("receipt-7"); return { id: input.id, found: true };
       } }]),
-  }).turn({ agentId: "agent", input: "find it", trace: { traceId, parentSpanId } });
+  }).turn({ allowedTools: ["read"], agentId: "agent", input: "find it", trace: { traceId, parentSpanId } });
   assert.ok(events.length > 0, "the actual runtime must emit records");
   assert.ok(events.every(event => event.traceId === traceId));
   assert.deepEqual(events.map(event => event.sequence), events.map((_, index) => index + 1));
@@ -95,8 +96,8 @@ test("failed tracing cannot mutate requests, authorize denied writes, or replay 
       if (event.type === "model.request" && event.content?.status === "captured") (event.content.value as any).messages[0].content = "mutated";
       throw new Error("private export failure");
     } } },
-    tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, execute() { effects++; } }]),
-  }).turn({ agentId: "agent", input: "original", choice: { description: "Choose", inputSchema: {}, authorizeWrite: () => false } });
+    tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseObject, execute() { effects++; } }]),
+  }).turn({ allowedTools: ["write"], agentId: "agent", input: "original", choice: { description: "Choose", inputSchema: {}, authorizeWrite: () => false } });
   assert.equal(effects, 0); assert.equal(calls, 2);
   const denied = events.find(event => event.type === "tool.finished" && event.record.id === "denied");
   assert.ok(denied?.type === "tool.finished");
@@ -135,9 +136,9 @@ test("original and compacted tool results remain distinguishable and over-limit 
   const events: TraceEvent[] = []; let calls = 0;
   const result = await runtime({ name: "fixture", async complete() { return ++calls === 1 ? use("read-1") : text(); } }, events, {
     tracing: { sink: { record: event => { events.push(event); } }, content: { maxBytes: 200 } },
-    tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read", execute: () => ({ large: "x".repeat(500) }) }]),
+    tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read", parse: parseObject, execute: () => ({ large: "x".repeat(500) }) }]),
     maxToolResultCharacters: 100, toolResultOverflow: () => ({ summary: "selected facts" }),
-  }).turn({ agentId: "agent", input: "read" });
+  }).turn({ allowedTools: ["read"], agentId: "agent", input: "read" });
   const original = events.find(event => event.type === "tool.result" && event.stage === "original")!;
   assert.equal(original.content?.status, "omitted");
   assert.ok(original.content?.status === "omitted" && original.content.reason === "size_limit");
@@ -205,10 +206,10 @@ test("a rejected final output and failed export preserve a completed effect with
   const events: TraceEvent[] = [];
   const result = await runtime({ name: "fixture", async complete() { return ++calls === 1 ? use("write-1", "write") : text("rejected output"); } }, [], {
     tracing: { sink: { record: event => { events.push(event); throw new Error("offline"); } } },
-    tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, execute: (_input, context) => {
+    tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseObject, execute: (_input, context) => {
       writes++; context.recordReceipt("committed-1"); return { saved: true };
     } }]), outputPolicy: { apply: output => ({ accepted: false, output, issues: ["policy"] }) },
-  }).turn({ agentId: "agent", input: "write" });
+  }).turn({ allowedTools: ["write"], agentId: "agent", input: "write" });
   assert.equal(writes, 1); assert.equal(calls, 2); assert.equal(result.status, "rejected");
   assert.deepEqual(result.toolCalls[0].receiptIds, ["committed-1"]);
   const check = events.find(event => event.type === "check.finished");
@@ -229,8 +230,8 @@ test("a tool withheld by the hop budget receives no execution event", async () =
   const events: TraceEvent[] = [];
   await assert.rejects(runtime({ name: "fixture", async complete() { return use("withheld"); } }, events, {
     maxHops: 1, tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read",
-      execute: () => assert.fail("budget must stop dispatch") }]),
-  }).turn({ agentId: "agent", input: "read" }), { code: "tool_hop_limit" });
+      parse: parseObject, execute: () => assert.fail("budget must stop dispatch") }]),
+  }).turn({ allowedTools: ["read"], agentId: "agent", input: "read" }), { code: "tool_hop_limit" });
   const finish = events.find(event => event.type === "tool.finished");
   assert.ok(finish?.type === "tool.finished"); assert.equal(finish.record.status, "not_started");
   assert.equal(events.some(event => event.type === "tool.started"), false);
@@ -249,8 +250,8 @@ test("an unserializable tool result leaves explicit missing content and preserve
   const events: TraceEvent[] = [];
   const cycle: { nested?: unknown } = {}; cycle.nested = cycle;
   await assert.rejects(runtime({ name: "fixture", async complete() { return use("read-1"); } }, events, {
-    tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read", execute: () => cycle }]),
-  }).turn({ agentId: "agent", input: "read" }), { code: "tool_result_serialization_failed" });
+    tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read", parse: parseObject, execute: () => cycle }]),
+  }).turn({ allowedTools: ["read"], agentId: "agent", input: "read" }), { code: "tool_result_serialization_failed" });
   const original = events.find(event => event.type === "tool.result" && event.stage === "original");
   assert.equal(original?.content?.status, "unavailable");
   const finish = events.find(event => event.type === "tool.finished");
@@ -265,7 +266,7 @@ test("capturing parsed tool input never invokes application serialization callba
       execute: input => { assert.equal(input.id, "item-7"); return { found: true }; },
     }]),
   });
-  await app.turn({ agentId: "agent", input: "read" });
+  await app.turn({ allowedTools: ["read"], agentId: "agent", input: "read" });
   assert.equal(serializations, 0);
   assert.equal(events.find(event => event.type === "tool.started")?.content?.status, "unavailable");
 });
@@ -276,7 +277,7 @@ test("capturing a parsed proxy does not enumerate application-owned data", async
   await runtime({ name: "fixture", async complete() { return ++calls === 1 ? use("read-1") : text(); } }, events, {
     tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read", parse: () => parsed,
       execute: input => ({ id: input.id }) }]),
-  }).turn({ agentId: "agent", input: "read" });
+  }).turn({ allowedTools: ["read"], agentId: "agent", input: "read" });
   assert.equal(enumerations, 0);
   assert.equal(events.find(event => event.type === "tool.started")?.content?.status, "unavailable");
 });

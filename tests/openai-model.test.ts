@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry } from "../src/index.js";
@@ -80,7 +81,7 @@ for (const scenario of cases) {
       persona: new StaticPersonaSource("Use only supplied facts."), memory: new EmptyMemorySource(),
       retry: { attempts: 3, delayMs: () => 0 },
       tools: new ToolRegistry([{ name: "save", description: "Save an accepted record", inputSchema: schema,
-        execute: () => { effects++; } }]),
+        parse: parseObject, execute: () => { effects++; } }]),
     });
     await assert.rejects(app.turn({ agentId: "extractor", input: JSON.stringify({ recordId: "item-7", sources: scenario.sources }),
       structuredOutput: { schema, parse: () => { parses++; throw rejection; } },

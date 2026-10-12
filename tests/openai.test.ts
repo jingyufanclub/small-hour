@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
@@ -85,7 +86,7 @@ test("OpenAI preserves native reasoning, phases, and tool call IDs through a rea
     execute: () => { reads++; return { id: "item-7", available: true }; },
   }]);
   const result = await runtime(new OpenAIProvider({ model: "test-model", apiKey: "test-key", fetch }), { tools })
-    .turn({ agentId: "router", input: "Read item-7." });
+    .turn({ allowedTools: ["lookup"], agentId: "router", input: "Read item-7." });
   assert.equal(reads, 1);
   assert.equal(result.output, "Available.");
   assert.equal(requests[0].body.tools[0].type, "function");
@@ -115,9 +116,9 @@ test("local compatibility preserves native history and sends no implicit cloud c
   const provider = new OpenAICompatibleProvider({ model: "loaded-model", baseURL: "http://127.0.0.1:11434/v1/", fetch, capabilities: { tools: true } });
   let reads = 0;
   const tools = new ToolRegistry([{ name: "lookup", mode: "read", description: "Read an item", inputSchema: lookupSchema,
-    execute: (input) => { reads++; return { id: (input as { id: string }).id, available: true }; },
+    parse: parseObject, execute: (input) => { reads++; return { id: (input as { id: string }).id, available: true }; },
   }]);
-  const result = await runtime(provider, { tools }).turn({ agentId: "router", input: "Read item-7." });
+  const result = await runtime(provider, { tools }).turn({ allowedTools: ["lookup"], agentId: "router", input: "Read item-7." });
   assert.equal(result.output, "Available.");
   assert.equal(reads, 1);
   assert.equal(requests.length, 2);
@@ -146,10 +147,10 @@ test("HTTP body serialization failure cannot be retried as a connection failure"
   const circular: Record<string, unknown> = {}; circular.self = circular;
   const { fetch, requests } = transport([]);
   let admissions = 0;
-  const tools = new ToolRegistry([{ name: "read", mode: "read", description: "Read", inputSchema: circular, execute: () => ({}) }]);
+  const tools = new ToolRegistry([{ name: "read", mode: "read", description: "Read", inputSchema: circular, parse: parseObject, execute: () => ({}) }]);
   await failure(runtime(new OpenAIProvider({ model: "test-model", apiKey: "test-key", fetch }), {
     tools, retry: { attempts: 3, delayMs: () => 0 }, modelCalls: { admit: () => { admissions++; return true; } },
-  }).turn({ agentId: "a", input: "go" }), "provider_failed");
+  }).turn({ allowedTools: ["read"], agentId: "a", input: "go" }), "provider_failed");
   assert.equal(requests.length, 0);
   assert.equal(admissions, 1);
 });
@@ -191,12 +192,13 @@ test("unsupported local features and incompatible thinking budgets start no mode
   for (const feature of ["tools", "choice", "structured", "thinking"] as const) await t.test(feature, async () => {
     const { fetch, requests } = transport([]);
     const provider = new OpenAICompatibleProvider({ model: "plain-model", baseURL: "http://localhost:1234/v1", fetch });
-    const tools = new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, execute: () => assert.fail("must not write") }]);
+    const tools = new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseObject, execute: () => assert.fail("must not write") }]);
     let admissions = 0;
     const app = runtime(provider, { ...(feature === "tools" ? { tools } : {}), modelCalls: { admit: () => { admissions++; return true; } } });
     const report = await failure(feature === "structured"
       ? app.turn({ agentId: "a", input: "go", structuredOutput: { schema, parse: (value) => value } })
-      : app.turn({ agentId: "a", input: "go", ...(feature === "thinking" ? { thinking: { budgetTokens: 200 } } : {}),
+      : app.turn({ agentId: "a", input: "go", ...(feature === "tools" ? { allowedTools: ["write"] } : {}),
+        ...(feature === "thinking" ? { thinking: { budgetTokens: 200 } } : {}),
         ...(feature === "choice" ? { choice: { description: "Choose an ID", inputSchema: schema } } : {}) }),
     feature === "tools" || feature === "choice" ? "tools_unsupported" : feature === "structured" ? "structured_output_unsupported" : "thinking_unsupported");
     assert.equal(requests.length, 0); assert.equal(admissions, 0); assert.equal(report.modelCalls.length, 0);
@@ -228,7 +230,7 @@ for (const protocol of ["responses", "chat"] as const) {
   test(`${protocol} incomplete and malformed tool output never causes a write`, async (t) => {
     for (const kind of ["incomplete", "malformed arguments", "withheld tool", "refusal", "filter"] as const) await t.test(kind, async () => {
       let writes = 0;
-      const tools = new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, execute: () => ++writes }]);
+      const tools = new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
       const args = kind === "malformed arguments" ? "{" : "{}";
       const body = protocol === "responses"
         ? kind === "filter" ? { ...response([]), status: "incomplete", incomplete_details: { reason: "content_filter" } }
@@ -241,7 +243,7 @@ for (const protocol of ["responses", "chat"] as const) {
             ...(kind === "incomplete" ? { choices: [{ finish_reason: "length", message: { role: "assistant", content: null,
               tool_calls: [{ type: "function", id: "write-1", function: { name: "write", arguments: args } }] } }] } : {}) };
       const { fetch, requests } = transport([body, success()]);
-      const input = { agentId: "a", input: "go", ...(kind === "withheld tool" ? { allowedTools: [] } : {}) };
+      const input = { agentId: "a", input: "go", allowedTools: kind === "withheld tool" ? [] : ["write"] };
       if (kind === "withheld tool") {
         const result = await runtime(make(fetch), { tools }).turn(input);
         assert.equal(result.toolCalls[0].status, "not_started");
