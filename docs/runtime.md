@@ -1,102 +1,54 @@
 # How Small Hour works
 
-Small Hour runs a bounded exchange between an application and a language model. A **turn** starts with one application request and can include several model calls. The core keeps no conversation history between turns.
+Small Hour handles the model calls and tool calls needed to answer one application request. That whole exchange is a **turn**. A turn can need several model calls: the model asks for information, your app supplies it, and the model answers.
 
-## Who owns what
+## Follow one request
 
-| Owner | Responsibility |
-| --- | --- |
-| Application | Defines workflows, selects facts and instructions, authorizes actions, implements tools, and decides what to save or show. |
-| Model | Interprets supplied information, requests available tools, and generates a response or structured result. |
-| Small Hour | Calls the provider, dispatches tools, enforces execution limits, applies configured checks, and reports outcomes and usage. |
-
-A **provider adapter** translates this common contract into the selected service's format. Applications choose the provider and model; capabilities differ. Managed Anthropic and OpenAI connections fix the official endpoint and select an API key; each adapter requests redirect rejection and disables SDK retries. Explicitly supplied clients and fetch implementations remain application-owned. A **tool** is an application function the model may request. The model cannot create tools or define its own workflow.
-
-## One turn, step by step
+Suppose your app asks the model to summarize a document. Your app provides a tool that reads documents the caller is allowed to access.
 
 ```mermaid
 sequenceDiagram
-    accTitle: One turn with a tool call
-    accDescr: The application supplies input and an explicit tool selection. Small Hour validates that selection before loading fresh context, admits each model call, requests redirect rejection and disables SDK retries. It runs the required local tool parser before execution. The application tool authorizes its effect. Small Hour returns the result with its original call ID, then checks the final output.
-    participant app as Application
-    participant runtime as Small Hour
-    participant provider as Model provider
-    participant tool as Application tool
-    app->>runtime: turn({ agentId, input, allowedTools })
-    runtime->>runtime: Validate explicit tool selection
-    runtime->>app: Load instructions and selected memory
-    app-->>runtime: Fresh context
-    runtime->>runtime: Check limits and admit call
-    Note over runtime,provider: Adapter requests no redirects or SDK retries
-    runtime->>provider: Input, context and tool schemas
-    provider-->>runtime: Tool request, call ID and usage
-    runtime->>runtime: Record usage, check allowlist, run parser
-    runtime->>tool: Execute checked arguments
-    tool->>tool: Authorize and perform the effect
-    tool-->>runtime: Tool result
-    runtime->>runtime: Check limits and admit next call
-    runtime->>provider: Tool result with original call ID
-    provider-->>runtime: Final output, stop reason and usage
-    runtime->>runtime: Record usage and check final output
-    runtime-->>app: Result and execution report
+    accTitle: A request that needs a tool
+    accDescr: The app supplies a request and context. Small Hour checks limits, calls the model, validates its tool request, and returns the checked answer. The application tool checks permission before reading.
+    participant App
+    participant Runtime as Small Hour
+    participant Model
+    participant Tool as App's document tool
+    App->>Runtime: Request, instructions, context, allowed tools
+    Runtime->>Model: Check limits, then send request
+    Model-->>Runtime: Please read this document
+    Runtime->>Tool: Validate arguments, then call tool
+    Tool->>Tool: Check access and read document
+    Tool-->>Runtime: Document contents
+    Runtime->>Model: Check limits, then send tool result
+    Model-->>Runtime: Summary
+    Runtime->>Runtime: Apply configured output checks
+    Runtime-->>App: Result, usage, and execution report
+    App->>App: Decide what to save or show
 ```
 
-1. The application calls `turn()`. Small Hour copies the input and checks the explicit tool selection before loading fresh instructions and selected memory from application sources.
-2. Small Hour checks remaining call capacity and runs any admission hook before contacting the provider. Optional spending hooks reserve the application's estimated cost.
-3. A model response supplies content, a stop reason and available usage. Accounting runs before tools or another call. Only a `tool_use` stop permits tool dispatch.
-4. Small Hour checks the tool allowlist and runs the required synchronous argument parser, then executes tools sequentially. Invalid arguments never start execution. Each application tool enforces permission at its actual effect. Results return with the original tool call IDs for the next model call.
-5. A valid final stop allows the output policy to check the response. The application receives the result and execution report, including calls, usage, tool outcomes, accepted choices and receipt references.
+Your app chooses the provider and model. A **provider adapter** translates Small Hour's requests into that provider's API format.
 
-An optional **choice** contract preserves an accepted selection and can require it before writes. The application then authorizes each write against that selection. Schemas validate shape; they cannot establish permission or truth.
+## Who decides what?
 
-Alternatively, **structured output** requests data with a JSON schema and a required application parser. It permits one successful model response, with bounded transport retries, and no tools in that turn. The parser can use a library such as Zod. Invalid output does not trigger an automatic repair call.
-
-## What happens when a limit is reached?
-
-A **hop** is one pass through the model/tool loop. A failed provider request can be retried within that hop; each retry consumes another call. Small Hour owns these retries and disables SDK retries.
-
-| Limit | Applies to | When it prevents continuation |
-| --- | --- | --- |
-| Deadline, hops and call count | The complete turn, including provider retries | No further model or tool work starts; the application receives an error and available report. |
-| Output token allowance | Each provider call, including reasoning where specified by the provider | A truncated response fails acceptance. |
-| Tool-result size | Each result sent back to the model | An oversized result fails unless the application supplies a bounded replacement. |
-| Spending scope, when configured | All reservations and charges assigned to that scope | Admission denies the next call if its reservation would exceed the limit. |
-
-A call count is not a money budget. Optional [spending controls](model-spending.md) use application-supplied prices and conservative estimates. Known charges are recorded even if an estimate was too low; uncertain calls keep their reservation until reconciled.
-
-Tools need capacity for a following model call. A write that fails after starting stops the turn because its effect may already exist. Cancellation cannot undo completed effects or force a non-cooperative callback to stop. Validation and read-tool errors can return generic feedback to the model; an application can explicitly supply a safe message. See [tool error handling](embedding.md#context-and-tools). An output policy can return a rejected result.
-
-See [execution limits](execution.md) and [provider token semantics](providers.md) for defaults and exact behavior.
-
-Optional [tracing](tracing.md) connects model attempts, tool calls and output checks under one trace ID. Content capture is explicit; applications supply the sink and control retention and access. Traces observe execution and do not authorize retries or effects.
-
-## Saved work and recovery
-
-Durability is optional and uses the application's SQLite connection. A **checkpoint** saves progress so a later process can inspect it. **Replay** returns a committed result without repeating the work. **Reconciliation** means checking authoritative records to establish what actually happened.
-
-```mermaid
-flowchart TD
-    accTitle: Model-step replay and recovery
-    accDescr: A completed step reuses its saved result without model or tool calls. Started or failed work requires application reconciliation. Only eligible work with explicit authorization against the inspected checkpoint can begin another bounded attempt.
-    inspect["Inspect the saved step"] --> state{"Stored state"}
-    state -->|Completed| replay["Reuse the saved result"]
-    state -->|Started or failed| reconcile["Application checks effects and spending"]
-    reconcile --> decision{"Eligible and explicitly authorized?"}
-    decision -->|Yes, exact checkpoint| retry["Another bounded attempt"]
-    decision -->|No| unresolved["Keep unresolved"]
-```
-
-[Local-operation receipts](local-operations.md) commit local database effects and results together. [Model-step checkpoints](model-steps.md) save explicit input, configuration, reports and completed results. They do not automatically copy retrieved memory or provider-native conversation history. Explicit image input is saved when model steps are selected.
-
-Completed model steps replay without model or tool calls, preserving rejection as well as acceptance. Unfinished work is never automatically replayed. An initially eligible, tool-free step can receive an application-authorized recovery attempt against its exact inspected checkpoint. Attempt and call limits survive restart; spending requires its own settlement.
-
-The optional [task runner](tasks.md) executes application-defined steps and [dispatches saved outputs](delivery.md) through application-supplied transports. Applications submit tasks, define eligibility and invoke the runner. No worker or polling loop starts on import.
-
-## Finished, accepted, saved and delivered
-
-| Outcome | Evidence |
+| Owner | Decisions |
 | --- | --- |
-| Model finished | A valid terminal provider response; it can still ask for clarification. |
-| Output accepted | The configured output policy or parser accepted it. |
-| Work saved | A committed application write or durable-store record. |
-| Output delivered | Transport evidence; provider acceptance and device or user receipt remain distinct. |
+| Your app | Instructions, relevant information, available tools, permissions, acceptable answers, and what users receive. |
+| Model | How to interpret the request, which offered tools to request, and what answer to generate. |
+| Small Hour | When another call is allowed, how tools run, and whether the response passes configured checks. |
+
+Small Hour loads instructions and context fresh for each turn. **It keeps no conversation history between turns.** Your app supplies anything the model should remember.
+
+You can also request [structured data](embedding.md#structured-results), such as a validated JSON object. That mode uses no tools and makes no automatic repair call when validation fails.
+
+## What stops the work?
+
+Calls, retries, time, output tokens, and tool-result sizes have [limits](execution.md). Optional [spending controls](model-spending.md) check a reservation before each model attempt. Reaching a limit stops further work and returns an error with available progress. Earlier effects or charges remain.
+
+Truncation, refusal, and unknown provider endings do not become accepted answers. The default text policy accepts completed text; your app supplies checks for meaning, factual accuracy, or tone.
+
+## What survives a crash?
+
+The core keeps nothing on disk. Optional [storage helpers](storage.md) save completed results and progress in your database. Completed work can be reused. Unfinished work needs your app to check what happened before continuing.
+
+Keep four outcomes separate: **the model finished**, **the answer passed checks**, **the result was saved**, and **the user received it**. Each needs its own evidence.

@@ -1,57 +1,58 @@
-# Execution tracing
+# See what happened in a turn
 
-Tracing is optional. Small Hour emits records to an application-supplied sink; the application chooses storage, retention, access, redaction, dashboards and alerts. No collector, database or background exporter starts automatically.
+Tracing records the model calls, tool calls, output checks, timing, and available usage within a request. It helps answer: **what did the model receive, what did it ask to do, and where did the request fail?**
 
-## One trace, separate operations
+Small Hour emits events. Your app sends them to its logger, database, or observability service and owns dashboards, access, and retention.
+
+## Connect your own tracing
+
+This extends the [quickstart's runtime options](../README.md#install-and-try):
+
+```ts
+const tracedRuntime = new SmallHourRuntime({
+  ...options,
+  tracing: {
+    sink: {
+      record(event) {
+        traceBuffer.enqueue(event);
+      },
+    },
+  },
+});
+```
+
+Supply `traceBuffer` as your bounded export queue. `record` must return synchronously and promptly; your app handles delivery, retries, shutdown flushing, and storage acknowledgements. A simple local logger can use `console.log(JSON.stringify(event))`.
+
+## Join related work
+
+A **trace ID** joins events from one request. A **span ID** identifies one operation within it.
 
 ```mermaid
 flowchart TD
-    accTitle: Trace identity through a tool exchange
-    accDescr: One trace ID joins a turn, its model attempts, tool calls and output check. Each operation has a distinct span ID. A requested tool is a child of the model attempt that requested it.
-    turn["Turn span · shared trace ID"] --> first["Model attempt 1"]
-    first --> tool["Tool call · original call ID"]
+    accTitle: One trace across several operations
+    accDescr: Model attempts, requested tools, and output checks share a trace ID but have separate span IDs.
+    turn["Turn"] --> first["Model attempt 1"]
+    first --> tool["Requested tool"]
     turn --> second["Model attempt 2"]
     turn --> check["Output check"]
 ```
 
-A **trace ID** joins related work. A **span ID** identifies one operation within it. Retries receive separate model spans; existing provider request IDs, model-call IDs, tool-call IDs and receipt IDs remain available. Each record has a timestamp and a sequence number within its turn. Finish records include elapsed time.
+Pass `trace: { traceId, parentSpanId }` to `turn()` to join an existing trace. IDs are nonzero lowercase hexadecimal: 32 characters for the trace, 16 for the optional parent span. Omission creates a new trace.
 
-```ts
-const runtime = new SmallHourRuntime({
-  provider,
-  persona,
-  memory,
-  tracing: {
-    sink: { record: event => traceBuffer.enqueue(event) },
-    content: { maxBytes: captureLimitBytes },
-  },
-});
+Events include timestamps, sequence numbers, IDs, available usage, stop reasons, tool outcomes, and check verdicts. Finish events include elapsed time. Errors use codes rather than exception messages. Application-selected IDs can still identify people.
 
-const result = await runtime.turn({
-  agentId,
-  input,
-  trace: { traceId, parentSpanId },
-});
-```
+## Capture content deliberately
 
-`traceBuffer`, its capacity and flush behavior belong to the application. `record` must return synchronously and promptly. Omit `content` for metadata-only events. Enabling content requires an application-selected positive byte limit; there is no default content limit. Omit the turn's `trace` to generate an invocation trace. Supplied IDs use nonzero lowercase hexadecimal: 32 characters for `traceId`, 16 for `parentSpanId`.
+By default, events contain metadata only. Add `content: { maxBytes: captureLimitBytes }` inside `tracing` to capture content; supply a positive byte limit.
 
-## What is captured
+Capture can include prompts, selected context, schemas, model responses, tool arguments/results, and final output. Built-in adapters also expose the actual request and decoded response bodies, excluding transport credentials and headers. These bodies can contain private text and images.
 
-Metadata includes identities, available model usage, normalized/native stop evidence, tool states and receipts, check verdicts, and the final runtime outcome. Error records use codes rather than exception messages. Metadata can still identify people through application-chosen IDs.
-
-Content capture adds detached JSON snapshots of input, selected instructions/context, offered tools or output schema, responses, parsed tool arguments, tool results and final output. Model records distinguish the common runtime representation from the built-in adapter's effective request and decoded response. Transport headers and credentials are excluded. Custom providers can report native bodies through `ProviderRequest.trace`; otherwise only the runtime representation is available.
-
-Tool results distinguish their original JSON representation from the serialized or compacted value supplied to the model. Native thinking blocks are retained when returned; they do not establish hidden reasoning or prove an effect occurred.
-
-Every content field says `captured`, `omitted` or `unavailable`. Oversized values are omitted with their byte count and configured limit; they are never silently clipped. Serialization failures leave execution unchanged. Images count toward the byte limit, including their encoded bytes. Configure sufficient capacity or treat omitted evidence as incomplete.
-
-Capture accepts plain JSON data. Proxies, accessors, custom serialization methods and non-JSON values are unavailable; tracing does not invoke application serialization code to inspect them.
+Each content field says `captured`, `omitted`, or `unavailable`. Oversized fields are omitted with their size; nothing is silently clipped. Unsafe serialization is unavailable. Native thinking returned by a provider may be captured; tracing cannot reveal hidden reasoning.
 
 ## Failure and recovery
 
-`result.trace` or `RuntimeError.report.trace` reports event count, export failures, content omissions and capture failures. Sink exceptions and unsupported promise returns cannot authorize work or trigger retries. Handoff counts do not prove persistence; the application owns export acknowledgements and shutdown flushing. A synchronous sink can consume execution time, so it must not perform slow work.
+Check `result.trace` or `RuntimeError.report.trace` for export failures and omissions. Sink failures do not retry work or change its outcome; slow synchronous sinks still consume execution time. Event handoff does not prove storage.
 
-Application callbacks receive trace context. For correlation across workflow steps or recovery, persist and resupply the same trace ID. SQLite model steps retain trace metadata in their existing reports. Completed replay returns the original evidence without new provider/tool events; an authorized recovery invocation gets a new turn span. Trace IDs do not replace durable operation identities.
+Save and resupply trace IDs to connect workflow steps and recovery. Completed [model-step replay](model-steps.md) returns saved trace metadata without new model/tool events.
 
-Capture settings apply to emitted events. Existing durable input/result storage keeps its own contract. Applications add context-selection and delivery evidence outside the runtime; a completed turn does not prove delivery. Required audit-before-effect policies need an explicit enforcement contract, separate from this observational sink.
+Trace IDs do not replace operation IDs. Content settings do not change durable storage. Tracing observes work; required audit-before-action checks need an application enforcement boundary.
