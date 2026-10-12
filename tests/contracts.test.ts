@@ -1,8 +1,9 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { callbackGate, deadlineClock } from "./deadline-clock.js";
 import {
-  EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
+  EmptyMemorySource, ModelSafeToolError, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse, type RuntimeOptions,
   type TurnReport,
 } from "../src/index.js";
@@ -58,25 +59,25 @@ test("each turn uses fresh host memory without inheriting prior tool exchanges",
       return selected;
     } },
     tools: new ToolRegistry([{ name: "lookup", description: "Look up an item", mode: "read", inputSchema: {},
-      execute: () => ({ itemId: "coat-1", location: "studio" }),
+      parse: parseObject, execute: () => ({ itemId: "coat-1", location: "studio" }),
     }]),
   });
 
-  await shared.turn({ agentId: "wardrobe", turnId: "find", input: "Find my coat." });
+  await shared.turn({ allowedTools: ["lookup"], agentId: "wardrobe", turnId: "find", input: "Find my coat." });
   assert.deepEqual(original, [{ role: "user", content: "Available item: coat-1" }]);
   assert.deepEqual(calls[1].messages.at(-1), { role: "user", content: [
     { type: "tool_result", toolUseId: "lookup-0", content: '{"itemId":"coat-1","location":"studio"}' },
   ] });
 
   selected = [{ role: "user", content: "Available item: boots-2" }];
-  await shared.turn({ agentId: "wardrobe", turnId: "replace", input: "What is available now?" });
+  await shared.turn({ allowedTools: ["lookup"], agentId: "wardrobe", turnId: "replace", input: "What is available now?" });
   assert.deepEqual(calls[2].messages, [
     { role: "user", content: "Available item: boots-2" },
     { role: "user", content: "What is available now?" },
   ]);
 
   selected = [];
-  await shared.turn({ agentId: "wardrobe", turnId: "empty", input: "Start with no saved context." });
+  await shared.turn({ allowedTools: ["lookup"], agentId: "wardrobe", turnId: "empty", input: "Start with no saved context." });
   assert.deepEqual(calls[3].messages, [{ role: "user", content: "Start with no saved context." }]);
   assert.deepEqual(loads, [
     { agentId: "wardrobe", turnId: "find", input: "Find my coat." },
@@ -110,7 +111,7 @@ test("a failed memory load cannot reuse an earlier turn's context", async () => 
 test("dispatch rejects a registered tool withheld from this turn", async () => {
   let writes = 0;
   const { provider, calls } = scripted([use("write"), text()]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
   const result = await runtime(provider, { tools }).turn({ agentId: "a", input: "go", allowedTools: [] });
   assert.equal(calls[0].tools.length, 0);
   assert.equal(writes, 0);
@@ -170,8 +171,8 @@ test("choice callback timeout preserves the decision and starts no following wri
   const clock = deadlineClock(t); const callback = callbackGate();
   let writes = 0;
   const { provider, calls } = scripted([use("small_hour_choose", "write"), text()]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
-  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
+  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({ allowedTools: ["write"],
     agentId: "a", input: "go", choice: {
       description: "choose", inputSchema: {}, parse: () => ({ selectedId: "item-7" }),
       onChoice: () => callback.wait(), authorizeWrite: () => true,
@@ -192,8 +193,8 @@ test("authorization timeout never starts the authorized operation", async (t) =>
   const clock = deadlineClock(t); const callback = callbackGate();
   let writes = 0;
   const { provider, calls } = scripted([use("small_hour_choose", "write"), text()]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
-  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
+  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({ allowedTools: ["write"],
     agentId: "a", input: "go", choice: { description: "choose", inputSchema: {},
       parse: () => ({ selectedId: "item-7" }),
       authorizeWrite: async () => { await callback.wait(); return true; } },
@@ -212,10 +213,10 @@ test("authorization timeout never starts the authorized operation", async (t) =>
 test("a later provider failure retains completed effects, receipts, choice, and usage", async () => {
   let writes = 0;
   const { provider, calls } = scripted([{ ...use("small_hour_choose", "write"), usage, requestId: "request-1" }, new Error("offline")]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: (_, context) => {
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: (_, context) => {
     writes++; context.recordReceipt("receipt-42"); return { saved: true };
   } }]);
-  const report = await failure(runtime(provider, { tools }).turn({
+  const report = await failure(runtime(provider, { tools }).turn({ allowedTools: ["write"],
     agentId: "agent-1", turnId: "turn-1", input: "go", choice: {
       description: "choose", inputSchema: {}, parse: () => ({ id: "selected-9" }), authorizeWrite: () => true,
     },
@@ -236,12 +237,12 @@ test("cancellation during a tool reports uncertainty and prevents subsequent too
   let laterWrites = 0;
   const { provider, calls } = scripted([use("slow", "later"), text()]);
   const tools = new ToolRegistry([
-    { name: "slow", description: "slow", inputSchema: {}, execute: async (_, context) => {
+    { name: "slow", description: "slow", inputSchema: {}, parse: parseObject, execute: async (_, context) => {
       context.recordReceipt("committed-before-wait"); await callback.wait(); context.recordReceipt("late-receipt"); return {};
     } },
-    { name: "later", description: "later", inputSchema: {}, execute: () => ++laterWrites },
+    { name: "later", description: "later", inputSchema: {}, parse: parseObject, execute: () => ++laterWrites },
   ]);
-  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({ agentId: "a", input: "go" }), "turn_aborted");
+  const pending = failure(runtime(provider, { tools, timeoutMs: 5 }).turn({ allowedTools: ["slow", "later"], agentId: "a", input: "go" }), "turn_aborted");
   await callback.entered;
   clock.tick(5);
   const report = await pending;
@@ -256,10 +257,10 @@ test("cancellation during a tool reports uncertainty and prevents subsequent too
 test("a write that throws after committing stops before the model can replay it", async () => {
   let writes = 0;
   const { provider, calls } = scripted([use("write"), text("try again")]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: (_, context) => {
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: (_, context) => {
     writes++; context.recordReceipt("committed-1"); throw new Error("acknowledgement failed");
   } }]);
-  const report = await failure(runtime(provider, { tools }).turn({ agentId: "a", input: "go" }), "tool_outcome_unknown");
+  const report = await failure(runtime(provider, { tools }).turn({ allowedTools: ["write"], agentId: "a", input: "go" }), "tool_outcome_unknown");
   assert.equal(writes, 1); assert.equal(calls.length, 1);
   assert.equal(report.toolCalls[0].status, "unknown");
   assert.deepEqual(report.toolCalls[0].receiptIds, ["committed-1"]);
@@ -269,9 +270,9 @@ test("invalid tool input remains recoverable without starting a write", async ()
   let writes = 0;
   const { provider, calls } = scripted([use("write"), text("please supply a valid ID")]);
   const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {},
-    parse: () => { throw new Error("missing ID"); }, execute: () => ++writes,
+    parse: () => { throw new ModelSafeToolError("missing ID"); }, execute: () => ++writes,
   }]);
-  const result = await runtime(provider, { tools }).turn({ agentId: "a", input: "go" });
+  const result = await runtime(provider, { tools }).turn({ allowedTools: ["write"], agentId: "a", input: "go" });
   assert.equal(writes, 0); assert.equal(result.toolCalls[0].status, "not_started");
   assert.equal(result.status, "reply");
   const errorMessage = calls[1].messages.at(-1);
@@ -297,8 +298,8 @@ test("duplicate provider call IDs are rejected before any effect in that batch",
   const response = use("write", "write");
   if (response.content[1].type === "tool_use") response.content[1].id = "write-0";
   const { provider } = scripted([response, text()]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
-  await failure(runtime(provider, { tools }).turn({ agentId: "a", input: "go" }), "invalid_tool_call");
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
+  await failure(runtime(provider, { tools }).turn({ allowedTools: ["write"], agentId: "a", input: "go" }), "invalid_tool_call");
   assert.equal(writes, 0);
 });
 
@@ -363,12 +364,12 @@ test("structured mode rejects unsupported, malformed, incomplete, and semantical
 test("model admission and accounting cover each retry and enforce a total call budget", async () => {
   const { provider, calls } = scripted([new Error("offline"), use("write"), text()]);
   const admitted: string[] = []; const recorded: string[] = []; let writes = 0;
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: () => ++writes }]);
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
   const report = await failure(runtime(provider, {
     tools, maxModelCalls: 2, retry: { attempts: 3, delayMs: () => 0 },
     modelCalls: { admit: (context) => { admitted.push(context.callId); return true; },
       record: (call) => { recorded.push(`${call.callId}:${call.status}`); } },
-  }).turn({ agentId: "a", input: "go" }), "model_call_limit");
+  }).turn({ allowedTools: ["write"], agentId: "a", input: "go" }), "model_call_limit");
   assert.equal(calls.length, 2); assert.equal(writes, 0);
   assert.equal(new Set(admitted).size, 2);
   assert.deepEqual(recorded, admitted.map((id, i) => `${id}:${i ? "responded" : "unknown"}`));
@@ -412,11 +413,11 @@ test("model admission and accounting obey the turn deadline", async (t) => {
 
 test("oversized results stop without hiding a completed write or sending a preview", async () => {
   const { provider, calls } = scripted([use("write"), text()]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: (_, context) => {
+  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: (_, context) => {
     context.recordReceipt("saved-1"); return { id: "saved-1", details: "x".repeat(500) };
   } }]);
   const report = await failure(runtime(provider, { tools, maxToolResultCharacters: 120 })
-    .turn({ agentId: "a", input: "go" }), "tool_result_too_large");
+    .turn({ allowedTools: ["write"], agentId: "a", input: "go" }), "tool_result_too_large");
   assert.equal(calls.length, 1); assert.equal(report.toolCalls[0].status, "completed");
   assert.deepEqual(report.toolCalls[0].receiptIds, ["saved-1"]);
 });
@@ -424,11 +425,11 @@ test("oversized results stop without hiding a completed write or sending a previ
 test("host compaction preserves selected IDs at the next provider boundary", async () => {
   const { provider, calls } = scripted([use("read"), text()]);
   const tools = new ToolRegistry([{ name: "read", description: "read", mode: "read", inputSchema: {},
-    execute: () => ({ selectedId: "exact-7", details: "x".repeat(500) }),
+    parse: parseObject, execute: () => ({ selectedId: "exact-7", details: "x".repeat(500) }),
   }]);
   await runtime(provider, { tools, maxToolResultCharacters: 120,
     toolResultOverflow: (value) => ({ selectedId: (value as { selectedId: string }).selectedId }),
-  }).turn({ agentId: "a", input: "go" });
+  }).turn({ allowedTools: ["read"], agentId: "a", input: "go" });
   assert.deepEqual(calls[1].messages.at(-1), { role: "user", content: [
     { type: "tool_result", toolUseId: "read-0", content: '{"selectedId":"exact-7"}' },
   ] });
@@ -439,7 +440,7 @@ test("result encoding failures preserve the completed effect and prevent more ca
     const clock = deadlineClock(t); const callback = callbackGate();
     const { provider, calls } = scripted([use("write"), text()]);
     const circular: Record<string, unknown> = {}; circular.self = circular;
-    const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, execute: (_, context) => {
+    const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: (_, context) => {
       context.recordReceipt("saved-7"); return kind === "circular" ? circular : { payload: "x".repeat(500) };
     } }]);
     const pending = failure(runtime(provider, { tools, timeoutMs: 10, maxToolResultCharacters: 120,
@@ -447,7 +448,7 @@ test("result encoding failures preserve the completed effect and prevent more ca
         if (kind === "compaction timeout") await callback.wait();
         throw new Error("could not compact");
       },
-    }).turn({ agentId: "a", input: "go" }), kind === "circular" ? "tool_result_serialization_failed"
+    }).turn({ allowedTools: ["write"], agentId: "a", input: "go" }), kind === "circular" ? "tool_result_serialization_failed"
       : kind === "compaction timeout" ? "turn_aborted" : "turn_failed");
     if (kind === "compaction timeout") {
       await callback.entered;
@@ -471,7 +472,7 @@ test("concurrent turns isolate model context, tool results, identities, and rece
   let release!: () => void;
   const bothStarted = new Promise<void>((resolve) => { release = resolve; });
   let started = 0;
-  const tools = new ToolRegistry([{ name: "save", description: "save", inputSchema: {}, execute: async (_, context) => {
+  const tools = new ToolRegistry([{ name: "save", description: "save", inputSchema: {}, parse: parseObject, execute: async (_, context) => {
     if (++started === 2) release();
     await bothStarted;
     context.recordReceipt(`${context.agentId}-receipt`); return { agentId: context.agentId };
@@ -479,7 +480,7 @@ test("concurrent turns isolate model context, tool results, identities, and rece
   const shared = runtime(provider, { tools,
     memory: { load: async ({ agentId }) => [{ role: "user", content: `${agentId} private context` }] },
   });
-  const results = await Promise.all(["first", "second"].map((id) => shared.turn({ agentId: id, turnId: `${id}-turn`, input: id })));
+  const results = await Promise.all(["first", "second"].map((id) => shared.turn({ allowedTools: ["save"], agentId: id, turnId: `${id}-turn`, input: id })));
   for (const result of results) {
     assert.equal(result.output, result.agentId);
     assert.equal(result.turnId, `${result.agentId}-turn`);

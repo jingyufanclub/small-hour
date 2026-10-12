@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import Anthropic from "@anthropic-ai/sdk";
@@ -77,7 +78,7 @@ for (const protocol of ["anthropic", "responses"] as const) {
     let reads = 0;
     const tools = new ToolRegistry([{ name: "lookup", mode: "read", description: "Read the selected record",
       inputSchema: { type: "object", properties: { recordId: { type: "string" } }, required: ["recordId"], additionalProperties: false },
-      execute: (input, context) => {
+      parse: parseObject, execute: (input, context) => {
         reads++;
         assert.deepEqual(input, { recordId: "item-7" });
         assert.equal(context.toolCallId, "call-7");
@@ -85,7 +86,7 @@ for (const protocol of ["anthropic", "responses"] as const) {
       } }]);
     const app = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("Use supplied facts."), memory: new EmptyMemorySource(),
       tools, retry: { attempts: 1, delayMs: () => 0 } });
-    const result = await app.turn({ agentId: "app", input: content });
+    const result = await app.turn({ allowedTools: ["lookup"], agentId: "app", input: content });
     assert.equal(reads, 1);
     assert.equal(requests.length, 2);
     const inputs = requests.map(item => protocol === "anthropic" ? item.body.messages : item.body.input);

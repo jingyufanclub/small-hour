@@ -1,5 +1,15 @@
 # Releases and upgrades
 
+## 0.8.0
+
+Registered tools now require explicit selection and local validation. Recoverable errors no longer forward arbitrary exception details to the model. This changes the public tool API:
+
+- Supply `allowedTools` on every ordinary turn whose runtime has registered tools. Choose names deliberately; `[]` withholds all registered tools. Omission fails with `tool_allowlist_required` before loading context or admitting a model call. Tool-free runtimes and structured-output turns retain their behavior.
+- Add a synchronous `parse(input)` to every registered tool. Validate the actual argument contract and return the checked value; a pass-through cast is not validation. Missing parsers reject registration, and promises or thrown errors prevent execution. Providers' schemas do not replace this local check.
+- Expect generic `Tool failed.` feedback with `tool_failed`, or a fixed runtime denial code. For safe repair instructions, throw `ModelSafeToolError(message, { cause })`; only its message is forwarded. Exception causes remain private, and uncertain writes still stop the turn. Explicit tool results and opt-in captured content keep their disclosure contract.
+
+See the [tool example and error contract](embedding.md#context-and-tools). No tables, schema migrations or backfills are added. Saved results are unchanged; completed replay does not rerun tool validation or sanitize historical content. Keep compatible handlers for pending workflows and bind changed selections or validation rules to new workflow revisions. A rollback restores the old permissive defaults and error disclosure behavior; retain explicit selections and safe error handling in the application. Consumer upgrades remain separate.
+
 ## 0.7.0
 
 The optional SQLite spending store accepts overlapping budget scopes. A call must fit every selected allowance before dispatch; one reservation and charge count toward each scope. Existing single-scope quote inputs and inspection shapes remain supported. `ModelSpendQuote` is now a union; narrow `quote.scopes` when reading it and use an intersection rather than interface inheritance when extending it. See the [policy, sequence and storage ERD](model-spending.md).
@@ -50,10 +60,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.7.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.7.0):
+Use the versioned package from the [0.8.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.8.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.7.0/small-hour-0.7.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.8.0/small-hour-0.8.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.

@@ -9,7 +9,7 @@ import { defaultRetryPolicy, type RetryPolicy } from "./retry.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { readTraceInput, readTracingOptions, TurnTrace, type TraceSpan, type TracingOptions } from "./tracing.js";
 import {
-  RuntimeError, type AssistantBlock, type ModelCallHooks, type ModelProvider, type ProviderMessage,
+  ModelSafeToolError, RuntimeError, type AssistantBlock, type ModelCallHooks, type ModelProvider, type ProviderMessage,
   type StructuredTurnInput, type StructuredTurnResult, type SystemBlock, type ToolCallRecord,
   type ToolResultBlock, type ToolResultOverflowContext, type TurnContext, type TurnInput,
   type TurnReport, type TurnResult, type TurnObserver,
@@ -308,11 +308,12 @@ export class SmallHourRuntime {
             } catch (error) {
               timeout.check();
               if (error instanceof RuntimeError && error.code === "checkpoint_failed") throw error;
-              call.errorCode = error instanceof RuntimeError ? error.code : "tool_failed";
+              call.errorCode = error instanceof RuntimeError && ["tool_not_allowed", "choice_already_made", "choice_invalid",
+                "choice_required_before_write", "choice_write_not_authorized"].includes(error.code) ? error.code : "tool_failed";
               if (call.status === "unknown" && mode === "write") throw new RuntimeError(`tool ${request.name} may have caused effects`, "tool_outcome_unknown", { cause: error });
               if ((request.name === choiceName && report.choice !== undefined) || this.options.toolErrorMode === "throw") throw new RuntimeError(`tool ${request.name} failed`, "tool_failed", { cause: error });
               results.push({ type: "tool_result", toolUseId: request.id, isError: true,
-                content: await this.toolResult({ error: error instanceof Error ? error.message : String(error), code: call.errorCode }, call, context, timeout, trace, span) });
+                content: await this.toolResult({ error: error instanceof ModelSafeToolError ? error.message : "Tool failed.", code: call.errorCode }, call, context, timeout, trace, span) });
               continue;
             }
             results.push({ type: "tool_result", toolUseId: request.id, content: await this.toolResult(value, call, context, timeout, trace, span) });

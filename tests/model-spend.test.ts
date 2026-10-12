@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -159,7 +160,7 @@ test("a silently ignored settlement cannot report success or continue executing 
   db.exec(`CREATE TRIGGER ignore_settlement BEFORE UPDATE ON small_hour_model_spend BEGIN SELECT RAISE(IGNORE); END`);
   await assert.rejects(runtime(spend, { name: "fixture", async complete() {
     calls++; return { ...response, content: [{ type: "tool_use", id: "write-1", name: "save", input: {} }], stopReason: "tool_use" };
-  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, execute() { effects++; } }]) })
+  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute() { effects++; } }]) })
     .turn({ ...input, allowedTools: ["save"] }), { code: "model_call_accounting_failed" });
   assert.equal(calls, 1); assert.equal(effects, 0);
   assert.throws(() => spend.reconcile(onlyCall(db), { status: "rejected", evidence: "provider:no-charge" }));
@@ -187,7 +188,7 @@ test("an accounting write failure stops the tool loop and preserves usage for la
     BEGIN SELECT CASE WHEN accounting_fault() = 1 THEN RAISE(ABORT, 'accounting unavailable') END; END`);
   const model = runtime(spend, { name: "fixture", async complete() {
     calls++; return { ...response, content: [{ type: "tool_use", id: "write-1", name: "save", input: {} }], stopReason: "tool_use" };
-  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, execute() { effects++; } }]) });
+  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute() { effects++; } }]) });
   const request = { scope: "workflow-a", id: "step-1", kind: "process", version: "1", input: {} };
   await assert.rejects(steps.run(request, model, { ...input, allowedTools: ["save"] }), { code: "model_call_accounting_failed" });
   assert.equal(calls, 1); assert.equal(effects, 0);

@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -297,7 +298,7 @@ test("permission and claim guards stop model tools before their effects", async 
     allowed = false;
     return { content: [{ type: "tool_use", id: "write-1", name: "write", input: {} }], stopReason: "tool_use" };
   } }, persona: new StaticPersonaSource("Use the tool."), memory: new EmptyMemorySource(),
-  tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, execute: () => { effects++; return {}; } }]) });
+  tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseObject, execute: () => { effects++; return {}; } }]) });
   const app = f.open([workflow([{ id: "model", kind: "model", prepare: () => ({ runtime, input: { agentId: "a", input: "write", allowedTools: ["write"] } }) }],
     { authorize: () => allowed ? { status: "allow" } : { status: "rejected", reason: "permission_revoked" } })]);
   app.runner.enqueue(task, schedule);

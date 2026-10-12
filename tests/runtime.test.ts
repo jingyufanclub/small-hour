@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
@@ -83,7 +84,7 @@ test("dispatches an allowlisted tool and returns its result to the provider", as
     description: "Read local weather",
     inputSchema: { type: "object" },
     mode: "read",
-    execute: (input: any, context) => ({ place: input.place, agent: context.agentId, rain: true }),
+    parse: parseObject, execute: (input: any, context) => ({ place: input.place, agent: context.agentId, rain: true }),
   }]);
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
 
@@ -109,7 +110,7 @@ test("normalizes an undefined tool result instead of crashing", async () => {
     name: "touch",
     description: "Perform an action with no return value",
     inputSchema: { type: "object" },
-    execute: () => undefined,
+    parse: parseObject, execute: () => undefined,
   }]);
   const runtime = new SmallHourRuntime({
     provider,
@@ -166,7 +167,7 @@ test("allows reads before a required choice", async () => {
     description: "look",
     inputSchema: { type: "object" },
     mode: "read",
-    execute: () => ({ weather: "rain" }),
+    parse: parseObject, execute: () => ({ weather: "rain" }),
   }]);
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
 
@@ -198,11 +199,11 @@ test("blocks writes before a required choice", async () => {
     description: "write",
     inputSchema: { type: "object" },
     mode: "write",
-    execute: () => ({ count: ++executions }),
+    parse: parseObject, execute: () => ({ count: ++executions }),
   }]);
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
 
-  const result = await runtime.turn({
+  const result = await runtime.turn({ allowedTools: ["write_note"],
     agentId: "a-write-early",
     input: "choose",
     choice: {
@@ -231,11 +232,11 @@ test("executes only a write explicitly authorized by the structured choice", asy
     description: "write",
     inputSchema: { type: "object" },
     mode: "write",
-    execute: () => ({ count: ++executions }),
+    parse: parseObject, execute: () => ({ count: ++executions }),
   }]);
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
 
-  const result = await runtime.turn({
+  const result = await runtime.turn({ allowedTools: ["write_note"],
     agentId: "a-write-authorized",
     input: "choose",
     choice: {
@@ -265,11 +266,11 @@ test("denies a choice-governed write without host authorization", async () => {
     description: "write",
     inputSchema: { type: "object" },
     mode: "write",
-    execute: () => ({ count: ++executions }),
+    parse: parseObject, execute: () => ({ count: ++executions }),
   }]);
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
 
-  const result = await runtime.turn({
+  const result = await runtime.turn({ allowedTools: ["write_note"],
     agentId: "a-write-denied",
     input: "choose",
     choice: { description: "choose", inputSchema: { type: "object" }, requiredFirst: true },
@@ -303,7 +304,7 @@ test("output rejection does not replay tools or silently clip text", async () =>
     description: "Write one note",
     inputSchema: { type: "object" },
     mode: "write",
-    execute: () => ({ count: ++executions }),
+    parse: parseObject, execute: () => ({ count: ++executions }),
   }]);
   const runtime = new SmallHourRuntime({
     provider,
@@ -329,7 +330,7 @@ test("rejects host compaction that still exceeds the configured bound", async ()
     description: "read a large value",
     inputSchema: { type: "object" },
     mode: "read",
-    execute: () => ({ payload: "x".repeat(500) }),
+    parse: parseObject, execute: () => ({ payload: "x".repeat(500) }),
   }]);
   const runtime = new SmallHourRuntime({
     provider,
@@ -340,7 +341,7 @@ test("rejects host compaction that still exceeds the configured bound", async ()
     toolResultOverflow: (value) => value,
   });
 
-  await assert.rejects(runtime.turn({ agentId: "a-large", input: "read" }),
+  await assert.rejects(runtime.turn({ allowedTools: ["large_read"], agentId: "a-large", input: "read" }),
     (error: unknown) => error instanceof RuntimeError && error.code === "tool_result_too_large");
   assert.equal(provider.calls.length, 1);
 });
@@ -369,7 +370,7 @@ test("does not execute a tool when no provider hop remains", async () => {
     description: "read",
     inputSchema: { type: "object" },
     mode: "read",
-    execute: () => ({ count: ++executions }),
+    parse: parseObject, execute: () => ({ count: ++executions }),
   }]);
   const runtime = new SmallHourRuntime({
     provider,
@@ -380,7 +381,7 @@ test("does not execute a tool when no provider hop remains", async () => {
   });
 
   await assert.rejects(
-    runtime.turn({ agentId: "a-last-hop", input: "read" }),
+    runtime.turn({ allowedTools: ["read_once"], agentId: "a-last-hop", input: "read" }),
     (error: unknown) => error instanceof RuntimeError && error.code === "tool_hop_limit",
   );
   assert.equal(executions, 0);
@@ -396,12 +397,12 @@ test("rejects an empty completion after a read tool", async () => {
     description: "read",
     inputSchema: { type: "object" },
     mode: "read",
-    execute: () => ({ value: 1 }),
+    parse: parseObject, execute: () => ({ value: 1 }),
   }]);
   const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
 
   await assert.rejects(
-    runtime.turn({ agentId: "a-empty", input: "read" }),
+    runtime.turn({ allowedTools: ["read_once"], agentId: "a-empty", input: "read" }),
     (error: unknown) => error instanceof RuntimeError && error.code === "missing_tool_answer",
   );
 });

@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -216,7 +217,7 @@ test("a failed progress write stops the tool loop before any following model cal
   const model = runtime({ name: "fixture", async complete() {
     if (++calls === 1) return { content: [{ type: "tool_use", id: "read-1", name: "lookup", input: {} }], stopReason: "tool_use" };
     return { content: [{ type: "text", text: "Found it." }], stopReason: "end_turn" };
-  } }, { tools: new ToolRegistry([{ name: "lookup", description: "Read", inputSchema: {}, mode: "read", execute: () => { reads++; return { id: "coat-7" }; } }]) });
+  } }, { tools: new ToolRegistry([{ name: "lookup", description: "Read", inputSchema: {}, mode: "read", parse: parseObject, execute: () => { reads++; return { id: "coat-7" }; } }]) });
   await assert.rejects(steps.run(request, model, { agentId: "owner-a", input: "Find the coat.", allowedTools: ["lookup"] }), { code: "checkpoint_failed" });
   assert.equal(reads, 1); assert.equal(calls, 1);
   assert.equal(steps.inspect(request)?.report.toolCalls[0].status, "completed");
@@ -258,7 +259,7 @@ test("a failed pre-tool checkpoint retains the fact that the application effect 
   let writes = 0;
   const model = runtime({ name: "fixture", async complete() {
     return { content: [{ type: "tool_use", id: "save-1", name: "save", input: {} }], stopReason: "tool_use" };
-  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, execute: () => { writes++; } }]) });
+  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute: () => { writes++; } }]) });
   await assert.rejects(steps.run(request, model, { agentId: "owner-a", input: "Save.", allowedTools: ["save"] }), { code: "checkpoint_failed" });
   assert.equal(writes, 0);
   assert.equal(steps.inspect(request)?.report.toolCalls[0].status, "not_started");
@@ -339,7 +340,7 @@ test("cancellation preserves partial tool receipts and prevents implicit recover
     if (calls === 1) return { content: [{ type: "tool_use", id: "save-tool", name: "save", input: {} }], stopReason: "tool_use" };
     controller.abort();
     return new Promise(() => {});
-  } }, { tools: new ToolRegistry([{ name: "save", description: "Save an outfit", inputSchema: {}, execute: (_, context) => {
+  } }, { tools: new ToolRegistry([{ name: "save", description: "Save an outfit", inputSchema: {}, parse: parseObject, execute: (_, context) => {
     operations.commit({ ...request, id: "save-1", kind: "save", input: {} }, {
       execute: connection => { connection.prepare("INSERT INTO outfits (item_ids) VALUES ('coat-7')").run(); return { id: "outfit-1" }; },
       parseResult: value => value as { id: string },
@@ -363,7 +364,7 @@ test("durable turns preserve allowlists and leave transient retries with the bou
   let calls = 0, writes = 0;
   const denied = runtime({ name: "fixture", async complete() {
     return { content: [{ type: "tool_use", id: "write-1", name: "save", input: {} }], stopReason: "tool_use" };
-  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, execute: () => { writes++; } }]), toolErrorMode: "throw" });
+  } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute: () => { writes++; } }]), toolErrorMode: "throw" });
   await assert.rejects(steps.run(request, denied, { agentId: "owner-a", input: "Only inspect.", allowedTools: [] }));
   assert.equal(writes, 0);
   assert.equal(steps.inspect(request)?.report.toolCalls[0].status, "not_started");

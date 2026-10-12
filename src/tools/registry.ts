@@ -1,4 +1,4 @@
-import type { JsonSchema, ProviderTool, ToolContext } from "../types.js";
+import { RuntimeError, type JsonSchema, type ProviderTool, type ToolContext } from "../types.js";
 import { checkAbort } from "../deadline.js";
 
 export interface ToolDefinition<TInput = unknown, TResult = unknown> {
@@ -7,7 +7,7 @@ export interface ToolDefinition<TInput = unknown, TResult = unknown> {
   inputSchema: JsonSchema;
   mode?: "read" | "write";
   strict?: boolean;
-  parse?: (input: unknown) => TInput;
+  parse(input: unknown): TInput;
   execute(input: TInput, context: ToolContext): Promise<TResult> | TResult;
 }
 
@@ -24,6 +24,7 @@ export class ToolRegistry {
     if (definition.mode !== undefined && definition.mode !== "read" && definition.mode !== "write") {
       throw new TypeError(`invalid tool mode: ${definition.mode}`);
     }
+    if (typeof definition.parse !== "function") throw new TypeError("tool requires a local argument parser");
     this.definitions.set(definition.name, definition);
     return this;
   }
@@ -33,15 +34,19 @@ export class ToolRegistry {
   }
 
   providerTools(allowed?: string[]): ProviderTool[] {
-    const allow = allowed ? new Set(allowed) : null;
-    if (allow) {
-      for (const name of allow) {
-        if (!this.definitions.has(name)) throw new Error(`unknown allowed tool: ${name}`);
-      }
+    if (allowed === undefined && this.definitions.size) {
+      throw new RuntimeError("registered tools require an explicit allowedTools selection", "tool_allowlist_required");
+    }
+    if (allowed !== undefined && (!Array.isArray(allowed) || allowed.some(name => typeof name !== "string" || !name.trim()))) {
+      throw new TypeError("allowedTools must be an array of tool names");
+    }
+    const allow = new Set(allowed ?? []);
+    for (const name of allow) {
+      if (!this.definitions.has(name)) throw new Error(`unknown allowed tool: ${name}`);
     }
 
     return [...this.definitions.values()]
-      .filter((definition) => !allow || allow.has(definition.name))
+      .filter((definition) => allow.has(definition.name))
       .map(({ name, description, inputSchema, strict }) => ({
         name,
         description,
@@ -60,7 +65,11 @@ export class ToolRegistry {
     checkAbort(context.signal);
     const definition = this.definitions.get(name);
     if (!definition) throw new Error(`unknown tool: ${name}`);
-    const parsed = definition.parse ? definition.parse(input) : input;
+    const parsed = definition.parse(input);
+    if (parsed && (typeof parsed === "object" || typeof parsed === "function") && typeof parsed.then === "function") {
+      void Promise.resolve(parsed).catch(() => {});
+      throw new TypeError("tool argument parser must return synchronously");
+    }
     checkAbort(context.signal);
     await onStart?.();
     checkAbort(context.signal);

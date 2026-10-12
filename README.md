@@ -21,20 +21,20 @@ Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool 
 - Anthropic, OpenAI Responses, and OpenAI-compatible Chat Completions adapters.
 - Fresh application-supplied instructions and memory on each turn.
 - Ordered text and image input through Anthropic and OpenAI Responses.
-- Sequential tools, per-turn allowlists, validated choices, and structured results.
+- Sequential tools with explicit per-turn selection and required local validation, validated choices, and structured results.
 - Bounded model calls, retries, deadlines, tokens, and tool results.
 - Execution reports with accepted decisions, usage, tool outcomes, and receipt references.
 - Optional correlated traces with explicit content capture and an application-supplied sink.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.7.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.8.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Install and run
 
 Requires Node.js 26.10 or later and ESM imports. The release includes built JavaScript and TypeScript declarations:
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.7.0/small-hour-0.7.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.8.0/small-hour-0.8.0.tgz
 ```
 
 Supply `OPENAI_API_KEY` and `OPENAI_MODEL` in your server environment. Save this as `quickstart.mts` and run `node quickstart.mts`; it makes a billable model request. For a local environment file, use `node --env-file=.env quickstart.mts` and keep that file outside version control.
@@ -76,7 +76,7 @@ try {
 
 The example supplies static instructions, no remembered context, no tools, and one model attempt. `turn()` returns the output, status and execution report; failures expose available progress through `RuntimeError.report`. Your app validates the answer for its destination and owns persistence and delivery.
 
-Swap the adapter for [Anthropic or an OpenAI-compatible endpoint](docs/providers.md). Add application functions through `ToolRegistry`, restrict each turn with `allowedTools`, or request a validated value with `structuredOutput: { schema, parse }`; see [embedding](docs/embedding.md). For source builds, upgrades and rollback, use the [release guide](docs/releases.md).
+Swap the adapter for [Anthropic or an OpenAI-compatible endpoint](docs/providers.md). Add application functions through `ToolRegistry` with a required synchronous `parse` validator, select tools explicitly with `allowedTools`, or request a validated value with `structuredOutput: { schema, parse }`. Tool failures return generic feedback unless you explicitly supply a `ModelSafeToolError`; see the [tool example and API contract](docs/embedding.md). For source builds, upgrades and rollback, use the [release guide](docs/releases.md).
 
 ## Enforce a cost budget
 

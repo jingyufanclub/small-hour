@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { EmptyMemorySource, IMAGE_INPUT_LIMITS, SmallHourRuntime, StaticPersonaSource } from "small-hour";
+import { EmptyMemorySource, IMAGE_INPUT_LIMITS, ModelSafeToolError, SmallHourRuntime, StaticPersonaSource, ToolRegistry } from "small-hour";
 import { AnthropicProvider } from "small-hour/providers/anthropic";
 import { OpenAIProvider } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
@@ -36,6 +36,30 @@ const plain = create({ name: "fixture", async complete(request) {
 const result = await plain.turn(input);
 assert.equal(result.status, "reply"); assert.equal(result.output, "item-7 is selected.");
 assert.deepEqual(result.modelCalls[0].stop, { reason: "end_turn" }); assert.equal(calls, 1);
+let toolCalls = 0;
+const withTools = new SmallHourRuntime({
+  persona: new StaticPersonaSource("Read the selected record."), memory: new EmptyMemorySource(),
+  tools: new ToolRegistry([{ name: "read_record", description: "Read a record", mode: "read", inputSchema: { type: "object" },
+    parse(value) { assert.deepEqual(value, { id: "item-7" }); return value; },
+    execute() { throw new ModelSafeToolError("Select an available record.", { cause: new Error("private diagnostic") }); },
+  }]),
+  provider: { name: "fixture", async complete(request) {
+    toolCalls++;
+    assert.deepEqual(request.tools.map(tool => tool.name), ["read_record"]);
+    if (toolCalls === 1) return { stopReason: "tool_use", content: [
+      { type: "tool_use", id: "read-1", name: "read_record", input: { id: "item-7" } },
+    ] };
+    assert.deepEqual(JSON.parse(request.messages.at(-1).content[0].content), {
+      error: "Select an available record.", code: "tool_failed",
+    });
+    assert.ok(!JSON.stringify(request).includes("private diagnostic"));
+    return answer("Choose another record.");
+  } },
+});
+await assert.rejects(withTools.turn({ agentId: input.agentId, input: input.input }), { code: "tool_allowlist_required" });
+assert.equal(toolCalls, 0);
+assert.equal((await withTools.turn({ ...input, allowedTools: ["read_record"] })).output, "Choose another record.");
+assert.equal(toolCalls, 2);
 const schema = { type: "object", properties: { selectedId: { type: "string", enum: ["item-7"] } }, required: ["selectedId"], additionalProperties: false };
 const structured = await create({ name: "fixture", capabilities: { structuredOutput: true }, async complete(request) {
   assert.deepEqual(request.outputSchema, schema); assert.deepEqual(request.tools, []); return answer('{"selectedId":"item-7"}');

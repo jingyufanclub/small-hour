@@ -1,3 +1,4 @@
+import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as api from "../src/index.js";
@@ -112,7 +113,7 @@ test("malformed image content fails before context loading, admission, or effect
       persona: { async load() { events.push("persona"); return "Inspect."; } },
       memory: { async load() { events.push("memory"); return []; } },
       modelCalls: { admit() { events.push("admit"); return true; } },
-      tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, execute() { events.push("effect"); } }]),
+      tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute() { events.push("effect"); } }]),
     });
     await failure(app.turn(input(supplied)), "invalid_input");
     assert.deepEqual(events, []);
@@ -212,10 +213,10 @@ test("callbacks cannot change image bytes across a real host tool round trip", a
     memory: { async load(context) { inspectContext("memory", context); return []; } },
     modelCalls: { admit(context) { inspectContext("admit", context); return true; } },
     tools: new ToolRegistry([{ name: "lookup", mode: "read", description: "Read the selected record", inputSchema: {},
-      execute(value, context) { inspectContext("tool", context); assert.deepEqual(value, { id: "item-7" }); return { id: "item-7", state: "available" }; } }]),
+      parse: parseObject, execute(value, context) { inspectContext("tool", context); assert.deepEqual(value, { id: "item-7" }); return { id: "item-7", state: "available" }; } }]),
     outputPolicy: { apply(output, context) { inspectContext("output", context); return { accepted: true, output }; } },
   });
-  const result = await app.turn(input(supplied));
+  const result = await app.turn({ ...input(supplied), allowedTools: ["lookup"] });
   assert.deepEqual(callbacks, ["persona", "memory", "admit", "tool", "admit", "output"]);
   assert.deepEqual(seen[0], [message(supplied)]);
   assert.deepEqual(seen[1][0], message(supplied));
