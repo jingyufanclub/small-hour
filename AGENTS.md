@@ -20,4 +20,6 @@ Define workflow outcomes and forbidden effects before implementation, then write
 
 Public documentation stays neutral and concise. Describe current capabilities, setup, contracts and consumer obligations; keep pages suitable for a five-minute scan. Exclude character framing, consumer-specific examples, comparison pitches and revision history.
 
-Keep public PRs short: describe the concrete change, necessary technical rationale, compatibility risks, and verification. Omit private conversations, internal decision history, agent-process narration, private tracker references, consumer details, and sensitive operational information.
+Keep PR titles and descriptions concise: the final technical change, validation, and material compatibility or recovery risks. Include technical rationale only when a choice would otherwise be unclear or a non-obvious constraint needs preserving to prevent the same mistake. Exclude change history, implementation diaries, abandoned approaches, private conversations, internal deliberation, and agent-process narration.
+
+Public documentation and PRs must also exclude private tracker references, consumer details, and sensitive operational information.
