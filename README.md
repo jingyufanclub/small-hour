@@ -1,8 +1,10 @@
 # Small Hour
 
-Small Hour is a TypeScript library that runs AI workflows inside your app. Your app supplies instructions, context, and tools—functions the model can request. Small Hour calls the model, runs allowed tools, and returns a result with usage and execution records.
+**One runtime for AI workflows you can control, inspect, and recover.**
 
-It handles retries, execution limits, and configured output checks across Anthropic, OpenAI, and OpenAI-compatible servers. Your app owns permissions, business rules, memory, and delivery.
+Small Hour is a TypeScript library that runs inside your app. It handles model calls, tool execution, retries, limits, and configured output checks through the same API for Anthropic, OpenAI, and OpenAI-compatible servers. Add cost budgets, traces, and saved work as you need them; reuse those controls across features and apps.
+
+Your app supplies instructions, context, and tools—functions the model can request—and keeps ownership of permissions, business rules, memory, and delivery.
 
 ## Install and try
 
