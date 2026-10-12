@@ -27,7 +27,7 @@ Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool 
 - Optional correlated traces with explicit content capture and an application-supplied sink.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.9.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Install and run
 
