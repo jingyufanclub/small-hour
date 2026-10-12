@@ -10,14 +10,14 @@ Small Hour runs a bounded exchange between an application and a language model. 
 | Model | Interprets supplied information, requests available tools, and generates a response or structured result. |
 | Small Hour | Calls the provider, dispatches tools, enforces execution limits, applies configured checks, and reports outcomes and usage. |
 
-A **provider adapter** translates this common contract into the selected service's format. Applications choose the provider and model; capabilities differ. A **tool** is an application function the model may request. The model cannot create tools or define its own workflow.
+A **provider adapter** translates this common contract into the selected service's format. Applications choose the provider and model; capabilities differ. Managed Anthropic and OpenAI connections fix the official endpoint and select an API key; each adapter requests redirect rejection and disables SDK retries. Explicitly supplied clients and fetch implementations remain application-owned. A **tool** is an application function the model may request. The model cannot create tools or define its own workflow.
 
 ## One turn, step by step
 
 ```mermaid
 sequenceDiagram
     accTitle: One turn with a tool call
-    accDescr: The application supplies input and an explicit tool selection. Small Hour validates that selection before loading fresh context, admits each model call and runs the required local tool parser before execution. The application tool authorizes its effect. Small Hour returns the result with its original call ID, then checks the final output.
+    accDescr: The application supplies input and an explicit tool selection. Small Hour validates that selection before loading fresh context, admits each model call, requests redirect rejection and disables SDK retries. It runs the required local tool parser before execution. The application tool authorizes its effect. Small Hour returns the result with its original call ID, then checks the final output.
     participant app as Application
     participant runtime as Small Hour
     participant provider as Model provider
@@ -27,6 +27,7 @@ sequenceDiagram
     runtime->>app: Load instructions and selected memory
     app-->>runtime: Fresh context
     runtime->>runtime: Check limits and admit call
+    Note over runtime,provider: Adapter requests no redirects or SDK retries
     runtime->>provider: Input, context and tool schemas
     provider-->>runtime: Tool request, call ID and usage
     runtime->>runtime: Record usage, check allowlist, run parser

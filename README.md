@@ -27,14 +27,14 @@ Read the [visual runtime guide](docs/runtime.md) for ownership, a complete tool 
 - Optional correlated traces with explicit content capture and an application-supplied sink.
 - Optional SQLite components for atomic local effects, model checkpoints, spending reservations, task execution, and saved-output delivery.
 
-Version 0.8.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
+Version 0.9.0; the API is under development. Text, images, tools, and structured results are supported. Streaming and audio input are unavailable. Consumer integrations and live-model behavior require separate verification.
 
 ## Install and run
 
 Requires Node.js 26.10 or later and ESM imports. The release includes built JavaScript and TypeScript declarations:
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.8.0/small-hour-0.8.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.9.0/small-hour-0.9.0.tgz
 ```
 
 Supply `OPENAI_API_KEY` and `OPENAI_MODEL` in your server environment. Save this as `quickstart.mts` and run `node quickstart.mts`; it makes a billable model request. For a local environment file, use `node --env-file=.env quickstart.mts` and keep that file outside version control.

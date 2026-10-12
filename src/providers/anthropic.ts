@@ -107,7 +107,16 @@ export class AnthropicProvider implements ModelProvider {
       this.thinking = { type: "adaptive", ...(thinking.effort === undefined ? {} : { effort: thinking.effort }) };
     }
     this.capabilities = { structuredOutput: true, thinkingBudget: this.thinking === undefined && this.temperature === undefined, images: true };
-    this.client = options.client ?? new Anthropic({ apiKey: options.apiKey, maxRetries: 0 });
+    if (options.client) {
+      this.client = options.client;
+    } else {
+      const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
+      if (typeof apiKey !== "string" || !apiKey.trim()) throw new TypeError("Anthropic API key is required");
+      if (process.env.ANTHROPIC_CUSTOM_HEADERS?.trim()) {
+        throw new TypeError("ANTHROPIC_CUSTOM_HEADERS requires an application-owned Anthropic client");
+      }
+      this.client = new Anthropic({ apiKey, authToken: null, baseURL: "https://api.anthropic.com", maxRetries: 0, logLevel: "off" });
+    }
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
@@ -136,7 +145,7 @@ export class AnthropicProvider implements ModelProvider {
       messages: anthropicMessages(request.messages),
     };
     request.trace?.request(body);
-    const message = await this.client.messages.create(body, { signal: request.signal, maxRetries: 0 });
+    const message = await this.client.messages.create(body, { signal: request.signal, maxRetries: 0, fetchOptions: { redirect: "error" } });
     request.trace?.response(message);
 
     return {
