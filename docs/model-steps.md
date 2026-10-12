@@ -4,7 +4,7 @@
 
 ## Execution
 
-`run(request, runtime, input)` returns `{ attemptId, replayed, result }`. The result retains structured, reply, silence, or rejected status. A completed rejection remains a rejection on replay.
+`run(request, runtime, input)` returns `{ attemptId, replayed, result, createdAt, updatedAt }`. The result retains structured, reply, silence, or rejected status. A completed rejection remains a rejection on replay. Inspection exposes the same [lifecycle timestamps](storage.md#lifecycle-timestamps); the optional constructor argument `{ now }` supplies the millisecond clock.
 
 The scoped `OperationRequest` binds kind, version, JSON input, and turn configuration: agent/input identity, explicit turn ID, schemas, token/choice settings, and allowed tools. Changed contracts fail before model or tool execution. Signals and callback implementations are excluded. Include revisions or immutable references for instructions, context, provider settings, validators, and effect policy; closure contents cannot be fingerprinted. Inputs are copied. Without an explicit turn ID, the attempt ID becomes its turn ID.
 
@@ -44,7 +44,7 @@ After inspecting incomplete work, the application can call `recover(request, run
 
 Late workers can add report facts only to their archived attempt and then receive `step_changed`. They cannot replace the current result. New evidence changes the checkpoint, so an earlier recovery decision becomes stale. Crashes before or after takeover require a fresh inspection and decision; no recovery worker or automatic retry starts.
 
-Recovery-enabled rows use format 2 in the existing table. Ordinary rows retain format 1 and remain readable and replayable, but cannot acquire recovery eligibility after execution. No backfill runs. Older readers reject format 2; retain compatible handlers or stop execution during rollback.
+Ordinary and recovery-enabled records use formats 3 and 4 respectively. Initialization upgrades prior rows while preserving payloads and recovery checkpoints; it cannot grant recovery eligibility after execution. Historical timestamps remain unknown. See [storage upgrades and rollback](releases.md#0100).
 
 ## Transactions and guards
 
@@ -52,6 +52,6 @@ Start, progress, completion, and failure use independent short transactions. An 
 
 The optional fourth argument `{ assertActive() }` supplies a synchronous guard alongside recovery options. It checks entry, progress, and final acceptance, saving available facts before rejecting continuation. Completed replay skips the guard; consuming boundaries still authorize disclosure and effects. [Tasks](tasks.md) use it for claims and cancellation.
 
-The table stores explicit contracts, configuration, reports, and results. Explicit [image input](images.md) stores exact bytes and order in the existing turn record; changed valid input conflicts and malformed stored input fails validation. No schema change or backfill is needed. Older readers reject array-input rows, including ordinary format-1 rows. It does not automatically retain retrieved memory or provider-native history. Keep secrets out of contracts and tool arguments. Retain evidence and compatible handlers during rollback; initialization makes no backfill. See [storage and access](security.md) and the [runtime observer](execution.md).
+The table stores explicit contracts, configuration, reports, and results. Explicit [image input](images.md) stores exact bytes and order in the existing turn record; changed valid input conflicts and malformed stored input fails validation. It does not automatically retain retrieved memory or provider-native history. Keep secrets out of contracts and tool arguments. Retain evidence and compatible handlers during rollback; initialization makes no application backfill. See [storage and access](security.md) and the [runtime observer](execution.md).
 
-Stop evidence is optional in format version 1. Rows written without it remain readable and are not backfilled. Readers validate supplied evidence and reject a final stop that contradicts the saved result. Older model-step readers tolerate the additional field; older spending readers omit it when presenting records. Rolling back therefore loses diagnostic visibility, and rewriting those records through older code can discard evidence. Retain a database backup and use the updated reader when investigating incomplete work. Consumers with exhaustive stop-reason switches must handle `context_limit` and `pause`.
+Stop evidence is optional. Rows written without it remain readable and are not backfilled. Readers validate supplied evidence and reject a final stop that contradicts the saved result. Consumers with exhaustive stop-reason switches must handle `context_limit` and `pause`.

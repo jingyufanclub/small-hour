@@ -3,6 +3,7 @@ import { readModelCallStop } from "../model-call-record.js";
 import type { ModelCallContext, ModelCallHooks, ModelCallRecord, TokenUsage } from "../types.js";
 import { canonicalJson } from "./json.js";
 import type { SqliteDatabase } from "./sqlite.js";
+import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOptions, type RecordTimestamps } from "./lifecycle.js";
 
 export interface ModelSpendScope {
   scope: string;
@@ -24,7 +25,7 @@ export type ModelSpendResolution = { evidence: string } & (
 );
 
 type CallIdentity = Pick<ModelCallContext, "agentId" | "turnId" | "callId" | "provider" | "model" | "attempt" | "hop" | "maxTokens" | "thinking">;
-export type ModelSpendRecord = {
+export type ModelSpendRecord = RecordTimestamps & {
   context: CallIdentity;
   quote: ModelSpendQuote;
   record: ModelCallRecord | null;
@@ -140,7 +141,7 @@ const validAmounts = `typeof(reserved_amount) = 'integer' AND reserved_amount BE
     OR (status = 'accepted' AND typeof(charged_amount) = 'integer' AND charged_amount BETWEEN 0 AND 9007199254740991)
     OR (status IN ('rejected', 'denied') AND charged_amount = 0))`;
 
-function storedRecord(row: Record<string, unknown>, version: 1 | 2): ModelSpendRecord {
+function storedRecord(row: Record<string, unknown>, version: 1 | 3): ModelSpendRecord {
   try {
     text(row.call_id);
     if (row.format_version !== version) throw new TypeError("Unsupported spending record.");
@@ -157,14 +158,16 @@ function storedRecord(row: Record<string, unknown>, version: 1 | 2): ModelSpendR
     if (status !== expectedStatus || ((status === "reserved" || status === "unknown") ? chargedAmount !== null : chargedAmount === null)
       || ((status === "rejected" || status === "denied") && chargedAmount !== 0)
       || (resolved?.status === "accepted" && chargedAmount !== resolved.amount)) throw new TypeError("Inconsistent spending outcome.");
-    return { context, quote: offered, status: expectedStatus, chargedAmount, record: savedRecord, resolution: resolved } as ModelSpendRecord;
+    return { context, quote: offered, status: expectedStatus, chargedAmount, record: savedRecord, resolution: resolved,
+      ...(version === 1 ? { createdAt: null, updatedAt: null } : readTimestamps(row)) } as ModelSpendRecord;
   } catch (cause) {
     throw new ModelSpendError("invalid_record", "The stored spending record failed validation.", { cause });
   }
 }
 
 export class SqliteModelSpendStore {
-  constructor(private readonly database: SqliteDatabase) {}
+  private readonly now: () => number;
+  constructor(private readonly database: SqliteDatabase, options: DurableClockOptions = {}) { this.now = options.now ?? Date.now; }
 
   initialize(): void {
     this.transaction(() => {
@@ -190,6 +193,7 @@ export class SqliteModelSpendStore {
         call_id TEXT NOT NULL REFERENCES small_hour_model_spend(call_id) ON DELETE RESTRICT,
         scope TEXT NOT NULL, PRIMARY KEY (call_id, scope)
       ); CREATE INDEX IF NOT EXISTS small_hour_model_spend_scopes_lookup ON small_hour_model_spend_scopes (scope, call_id)`);
+      initializeTimestamps(db, "small_hour_model_spend_scopes", []);
       if (legacy) {
         let after: string | null = null;
         for (;;) {
@@ -197,12 +201,13 @@ export class SqliteModelSpendStore {
             .get(...(after === null ? [] : [after])) as Record<string, unknown> | undefined;
           if (!row) break;
           const saved = storedRecord(row, 1);
-          this.insertScopes(saved.context.callId, saved.quote);
+          this.insertScopes(saved.context.callId, saved.quote, null);
           changed(db.prepare("UPDATE small_hour_model_spend SET format_version = 2 WHERE call_id = ?").run(saved.context.callId));
           after = saved.context.callId;
         }
         db.exec("DROP INDEX IF EXISTS small_hour_model_spend_scope; ALTER TABLE small_hour_model_spend DROP COLUMN scope");
       }
+      initializeTimestamps(db, "small_hour_model_spend", [[2, 3]]);
     });
   }
 
@@ -222,12 +227,13 @@ export class SqliteModelSpendStore {
             const total = this.inspectBudget(scope).totalAmount;
             if (total > limit || offered.amount > limit - total) admitted = false;
           }
+          const time = recordTime(this.now);
           changed(this.database.prepare(`INSERT INTO small_hour_model_spend
-            (call_id, context_json, quote_json, reserved_amount, status, charged_amount, format_version)
-            VALUES (?, ?, ?, ?, ?, ?, 2)`)
+            (call_id, context_json, quote_json, reserved_amount, status, charged_amount, format_version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 3, ?, ?)`)
             .run(call.callId, canonicalJson(call), canonicalJson(offered), offered.amount,
-              admitted ? "reserved" : "denied", admitted ? null : 0));
-          this.insertScopes(call.callId, offered);
+              admitted ? "reserved" : "denied", admitted ? null : 0, time, time));
+          this.insertScopes(call.callId, offered, time);
           return admitted;
         });
       },
@@ -241,8 +247,8 @@ export class SqliteModelSpendStore {
         if (checked.status === "responded" && checked.usage) {
           charged = synchronous(policy.charge(checked.usage, saved.quote.pricing)); amount(charged); status = "accepted";
         } else if (checked.status === "rejected") { status = "rejected"; charged = 0; }
-        changed(this.database.prepare("UPDATE small_hour_model_spend SET status = ?, charged_amount = ?, record_json = ? WHERE call_id = ?")
-          .run(status, charged, json, call.callId));
+        changed(this.database.prepare("UPDATE small_hour_model_spend SET status = ?, charged_amount = ?, record_json = ?, updated_at = ? WHERE call_id = ?")
+          .run(status, charged, json, recordTime(this.now, saved.updatedAt), call.callId));
       }),
     };
   }
@@ -251,7 +257,7 @@ export class SqliteModelSpendStore {
     text(callId);
     const row = this.database.prepare("SELECT * FROM small_hour_model_spend WHERE call_id = ?").get(callId) as Record<string, unknown> | undefined;
     if (row === undefined) return undefined;
-    const saved = storedRecord(row, 2), selected = scopes(saved.quote);
+    const saved = storedRecord(row, 3), selected = scopes(saved.quote);
     const indexed = this.database.prepare(`SELECT COUNT(*) AS total,
       COALESCE(SUM(CASE WHEN scope IN (${selected.map(() => "?").join(",")}) THEN 1 ELSE 0 END), 0) AS matched
       FROM small_hour_model_spend_scopes WHERE call_id = ?`).get(...selected.map(value => value.scope), callId) as { total: number; matched: number };
@@ -267,7 +273,7 @@ export class SqliteModelSpendStore {
       COALESCE(SUM(CASE WHEN status = 'accepted' THEN charged_amount ELSE 0 END), 0) AS accepted,
       COALESCE(SUM(CASE WHEN status = 'reserved' THEN reserved_amount ELSE 0 END), 0) AS reserved,
       COALESCE(SUM(CASE WHEN status = 'unknown' THEN reserved_amount ELSE 0 END), 0) AS unknown,
-      COALESCE(SUM(CASE WHEN format_version = 2 AND (${validAmounts}) THEN 0 ELSE 1 END), 0) AS invalid
+      COALESCE(SUM(CASE WHEN format_version = 3 AND (${validAmounts}) THEN 0 ELSE 1 END), 0) AS invalid
       FROM small_hour_model_spend_scopes AS membership LEFT JOIN small_hour_model_spend AS spending
         ON spending.call_id = membership.call_id WHERE membership.scope = ?`).get(scope) as Record<string, unknown>;
     try {
@@ -286,8 +292,8 @@ export class SqliteModelSpendStore {
       const saved = this.require(callId);
       if (saved.resolution && canonicalJson(saved.resolution) === json) return saved;
       if (saved.status !== "reserved" && saved.status !== "unknown") throw new ModelSpendError("settlement_conflict", "Only unresolved spending can be reconciled.");
-      changed(this.database.prepare("UPDATE small_hour_model_spend SET status = ?, charged_amount = ?, resolution_json = ? WHERE call_id = ?")
-        .run(checked.status, checked.status === "accepted" ? checked.amount : 0, json, callId));
+      changed(this.database.prepare("UPDATE small_hour_model_spend SET status = ?, charged_amount = ?, resolution_json = ?, updated_at = ? WHERE call_id = ?")
+        .run(checked.status, checked.status === "accepted" ? checked.amount : 0, json, recordTime(this.now, saved.updatedAt), callId));
       return this.require(callId);
     });
   }
@@ -298,9 +304,10 @@ export class SqliteModelSpendStore {
     return saved;
   }
 
-  private insertScopes(callId: string, offered: ModelSpendQuote): void {
+  private insertScopes(callId: string, offered: ModelSpendQuote, time: number | null): void {
     for (const { scope } of scopes(offered)) {
-      changed(this.database.prepare("INSERT INTO small_hour_model_spend_scopes (call_id, scope) VALUES (?, ?)").run(callId, scope));
+      changed(this.database.prepare("INSERT INTO small_hour_model_spend_scopes (call_id, scope, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        .run(callId, scope, time, time));
     }
   }
 

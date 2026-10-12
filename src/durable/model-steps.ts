@@ -6,6 +6,7 @@ import { readTraceInput } from "../tracing.js";
 import type { SmallHourRuntime } from "../runtime.js";
 import { RuntimeError, type StructuredTurnInput, type StructuredTurnResult, type TurnInput, type TurnReport, type TurnResult } from "../types.js";
 import { canonicalJson } from "./json.js";
+import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOptions, type RecordTimestamps } from "./lifecycle.js";
 import { readReport, readResult, reportValue, resultJson, type SavedTurn } from "./model-step-record.js";
 import type { OperationRequest, SqliteDatabase } from "./sqlite.js";
 
@@ -17,13 +18,13 @@ export type ModelStepAttempt = { attemptId: string; report: TurnReport } & (
   | { status: "superseded"; recovery: ModelStepRecoveryDecision; errorCode?: never }
 );
 type ArchivedAttempt = ModelStepAttempt & { recovery: ModelStepRecoveryDecision };
-export type ModelStepState = { attemptId: string; report: TurnReport; checkpoint: string;
+export type ModelStepState = RecordTimestamps & { attemptId: string; report: TurnReport; checkpoint: string;
   attempts: ModelStepAttempt[]; recovery?: ModelRecoveryContract } & (
   | { status: "started" }
   | { status: "failed"; errorCode: string }
   | { status: "completed"; result: SavedTurn }
 );
-export interface ModelStepResult<Result> {
+export interface ModelStepResult<Result> extends RecordTimestamps {
   attemptId: string;
   replayed: boolean;
   result: Result;
@@ -191,7 +192,8 @@ function preservedReport(previous: TurnReport, next: TurnReport): TurnReport {
 }
 
 export class SqliteModelStepStore {
-  constructor(private readonly database: SqliteDatabase) {}
+  private readonly now: () => number;
+  constructor(private readonly database: SqliteDatabase, options: DurableClockOptions = {}) { this.now = options.now ?? Date.now; }
 
   initialize(): void {
     this.database.exec(`CREATE TABLE IF NOT EXISTS small_hour_model_steps (
@@ -200,6 +202,7 @@ export class SqliteModelStepStore {
       status TEXT NOT NULL, report_json TEXT NOT NULL, result_json TEXT, error_code TEXT,
       format_version INTEGER NOT NULL, PRIMARY KEY (scope, id)
     )`);
+    initializeTimestamps(this.database, "small_hour_model_steps", [[1, 3], [2, 4]]);
   }
 
   inspect(request: OperationRequest): ModelStepState | undefined {
@@ -232,10 +235,11 @@ export class SqliteModelStepStore {
       readReport(report);
       const storedTurn = recovery ? canonicalJson({ turn: JSON.parse(contract), recovery, turnId }) : contract;
       const storedReport = recovery ? canonicalJson({ report, attempts: [] }) : canonicalJson(report);
+      const createdAt = recordTime(this.now);
       const inserted = this.database.prepare(`INSERT INTO small_hour_model_steps
-        (scope, id, kind, version, input_json, turn_json, attempt_id, status, report_json, format_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'started', ?, ?)`)
-        .run(checked.scope, checked.id, checked.kind, checked.version, checked.inputJson, storedTurn, attemptId, storedReport, recovery ? 2 : 1);
+        (scope, id, kind, version, input_json, turn_json, attempt_id, status, report_json, format_version, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'started', ?, ?, ?, ?)`)
+        .run(checked.scope, checked.id, checked.kind, checked.version, checked.inputJson, storedTurn, attemptId, storedReport, recovery ? 4 : 3, createdAt, createdAt);
       if (Number(inserted.changes) !== 1) throw new ModelStepError("step_changed", "The started model step was not recorded.");
       return { state: this.load(checked, this.row(checked)).state, replayed: false };
     });
@@ -266,9 +270,9 @@ export class SqliteModelStepStore {
       const attemptId = randomUUID();
       const report: TurnReport = { agentId: state.report.agentId, turnId: state.report.turnId, hops: 0, toolCalls: [], modelCalls: [], usage: [] };
       const changed = this.database.prepare(`UPDATE small_hour_model_steps
-        SET attempt_id = ?, status = 'started', report_json = ?, result_json = NULL, error_code = NULL
+        SET attempt_id = ?, status = 'started', report_json = ?, result_json = NULL, error_code = NULL, updated_at = ?
         WHERE scope = ? AND id = ? AND attempt_id = ? AND status <> 'completed'`)
-        .run(attemptId, canonicalJson({ report, attempts: [...saved.archived, archived] }), checked.scope, checked.id, state.attemptId);
+        .run(attemptId, canonicalJson({ report, attempts: [...saved.archived, archived] }), recordTime(this.now, state.updatedAt), checked.scope, checked.id, state.attemptId);
       if (Number(changed.changes) !== 1) throw new ModelStepError("step_changed", "The recovery attempt was not recorded.");
       return { state: this.load(checked, this.row(checked)).state, replayed: false };
     });
@@ -279,7 +283,8 @@ export class SqliteModelStepStore {
   private replay(state: ModelStepState, input: AnyInput): ModelStepResult<SavedTurn> {
     if (state.status !== "completed") throw new ModelStepError("step_unresolved",
       "This model step has no completed checkpoint; the application must reconcile it before starting new work.", { state });
-    return { attemptId: state.attemptId, replayed: true, result: validateResult(resultJson(state.result), input, "invalid_checkpoint") };
+    return { attemptId: state.attemptId, replayed: true, result: validateResult(resultJson(state.result), input, "invalid_checkpoint"),
+      createdAt: state.createdAt, updatedAt: state.updatedAt };
   }
 
   private async execute(checked: CheckedRequest, runtime: SmallHourRuntime, selected: AnyInput, state: ModelStepState,
@@ -299,7 +304,8 @@ export class SqliteModelStepStore {
       lastReport = result;
       const json = resultJson(result), validated = validateResult(json, selected, "invalid_result");
       this.update(checked, state.attemptId, "completed", result, json, null, assertActive);
-      return { attemptId: state.attemptId, replayed: false, result: validated };
+      const completed = this.load(checked, this.row(checked)).state;
+      return { attemptId: state.attemptId, replayed: false, result: validated, createdAt: completed.createdAt, updatedAt: completed.updatedAt };
     } catch (cause) {
       const failure = cause instanceof RuntimeError && cause.cause instanceof ModelStepError ? cause.cause : cause;
       try {
@@ -339,9 +345,11 @@ export class SqliteModelStepStore {
         const archived = saved.archived.find(attempt => attempt.attemptId === attemptId);
         if (!archived) return "changed";
         archived.report = preservedReport(archived.report, incoming);
-        const changed = this.database.prepare(`UPDATE small_hour_model_steps SET report_json = ?
+        const encoded = canonicalJson({ report: state.report, attempts: saved.archived });
+        const changed = this.database.prepare(`UPDATE small_hour_model_steps
+          SET updated_at = CASE WHEN report_json <> ? THEN ? ELSE updated_at END, report_json = ?
           WHERE scope = ? AND id = ? AND attempt_id = ?`)
-          .run(canonicalJson({ report: state.report, attempts: saved.archived }), request.scope, request.id, state.attemptId);
+          .run(encoded, recordTime(this.now, state.updatedAt), encoded, request.scope, request.id, state.attemptId);
         if (Number(changed.changes) !== 1) throw new ModelStepError("step_changed", "The superseded attempt's evidence could not be saved.");
         return "changed";
       }
@@ -350,9 +358,10 @@ export class SqliteModelStepStore {
       const encoded = canonicalJson(saved.format === 2 ? { report: incoming, attempts: saved.archived } : incoming);
       assertActive?.();
       const changed = this.database.prepare(`UPDATE small_hour_model_steps
-        SET status = ?, report_json = ?, result_json = ?, error_code = ?
+        SET updated_at = CASE WHEN status <> ? OR report_json <> ? OR result_json IS NOT ? OR error_code IS NOT ? THEN ? ELSE updated_at END,
+          status = ?, report_json = ?, result_json = ?, error_code = ?
         WHERE scope = ? AND id = ? AND attempt_id = ? AND status = 'started'`)
-        .run(status, encoded, result, errorCode, request.scope, request.id, attemptId);
+        .run(status, encoded, result, errorCode, recordTime(this.now, state.updatedAt), status, encoded, result, errorCode, request.scope, request.id, attemptId);
       if (Number(changed.changes) !== 1) throw new ModelStepError("step_changed", "The model step is no longer the active attempt.");
       return status === "started" && state.recovery && callCount([...saved.archived, { report: incoming }]) > state.recovery.maxModelCalls ? "limit" : "saved";
     });
@@ -367,7 +376,8 @@ export class SqliteModelStepStore {
   private load(request: CheckedRequest, value: unknown): { state: ModelStepState; turnJson: string; archived: ArchivedAttempt[]; format: number } {
     if (!value || typeof value !== "object") throw new ModelStepError("invalid_checkpoint", "The model step record is unavailable.");
     const row = value as Record<string, unknown>;
-    const format = Number(row.format_version);
+    // Recovery checkpoints bind the payload format independently of timestamp storage.
+    const format = Number(row.format_version) - 2;
     if (typeof row.kind !== "string" || typeof row.version !== "string" || typeof row.input_json !== "string"
       || (format !== 1 && format !== 2)) {
       throw new ModelStepError("invalid_checkpoint", "The model step format is unavailable or unsupported.");
@@ -429,7 +439,7 @@ export class SqliteModelStepStore {
       const checkpoint = "sha256:" + createHash("sha256").update(canonicalJson({ scope: request.scope, id: request.id,
         kind: row.kind, version: row.version, input: JSON.parse(request.inputJson), turn: storedTurn,
         format, attempt: current, archived, result: result ?? null })).digest("hex");
-      const base = { attemptId: row.attempt_id, report, checkpoint, attempts, ...(recovery ? { recovery } : {}) };
+      const base = { attemptId: row.attempt_id, report, checkpoint, attempts, ...readTimestamps(row), ...(recovery ? { recovery } : {}) };
       const state: ModelStepState = current.status === "completed" ? { ...base, status: "completed", result: result! }
         : current.status === "failed" ? { ...base, status: "failed", errorCode: current.errorCode } : { ...base, status: "started" };
       return { state, turnJson: canonicalJson(turn), archived, format };

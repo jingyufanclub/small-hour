@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./json.js";
 import type { OperationRequest, SqliteDatabase } from "./sqlite.js";
+import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOptions, type RecordTimestamps } from "./lifecycle.js";
 
 export interface DeliveryReceipt { id: string; evidence: unknown }
 export type DeliveryOutcome =
@@ -20,7 +21,7 @@ export interface DeliverySink {
   reconcile?(product: OperationRequest, context: DeliveryContext): Promise<DeliveryOutcome>;
 }
 export interface DeliveryAttempt { id: string; outcome: DeliveryOutcome }
-export type DeliveryState = { attempts: DeliveryAttempt[] } & (DeliveryOutcome | { status: "queued" });
+export type DeliveryState = RecordTimestamps & { attempts: DeliveryAttempt[] } & (DeliveryOutcome | { status: "queued" });
 export class DeliveryError extends Error {
   constructor(readonly code: "invalid_delivery" | "invalid_outcome" | "evidence_conflict", message: string, options?: ErrorOptions) {
     super(message, options); this.name = "DeliveryError";
@@ -72,20 +73,23 @@ export function deliveryKey(product: Key): string {
 }
 
 export class DeliveryLedger {
-  constructor(private readonly database: SqliteDatabase) {}
+  private readonly now: () => number;
+  constructor(private readonly database: SqliteDatabase, options: DurableClockOptions = {}) { this.now = options.now ?? Date.now; }
   initialize(): void {
     this.database.exec(`CREATE TABLE IF NOT EXISTS small_hour_deliveries (
       scope TEXT NOT NULL, id TEXT NOT NULL, attempts_json TEXT NOT NULL, format_version INTEGER NOT NULL,
       PRIMARY KEY (scope, id)
     )`);
+    initializeTimestamps(this.database, "small_hour_deliveries", [[1, 2]]);
   }
   inspect(key: Key): DeliveryState {
-    const row = this.database.prepare("SELECT attempts_json, format_version FROM small_hour_deliveries WHERE scope = ? AND id = ?")
-      .get(key.scope, key.id) as { attempts_json: string; format_version: number } | undefined;
-    if (!row) return { status: "queued", attempts: [] };
+    const row = this.database.prepare("SELECT * FROM small_hour_deliveries WHERE scope = ? AND id = ?")
+      .get(key.scope, key.id) as Record<string, unknown> | undefined;
+    if (!row) return { status: "queued", attempts: [], createdAt: null, updatedAt: null };
     try {
-      if (row.format_version !== 1) throw new TypeError("Unsupported delivery format");
-      const attempts = JSON.parse(row.attempts_json) as DeliveryAttempt[], ids = new Set<string>();
+      if (row.format_version !== 2) throw new TypeError("Unsupported delivery format");
+      const timestamps = readTimestamps(row);
+      const attempts = JSON.parse(String(row.attempts_json)) as DeliveryAttempt[], ids = new Set<string>();
       if (!Array.isArray(attempts) || !attempts.length) throw new TypeError("Missing delivery attempts");
       for (const attempt of attempts) {
         fields(attempt, ["id", "outcome"]); nonempty(attempt.id); if (ids.has(attempt.id)) throw new TypeError("Repeated delivery attempt"); ids.add(attempt.id);
@@ -94,18 +98,18 @@ export class DeliveryLedger {
       if (canonicalJson(attempts) !== row.attempts_json) throw new TypeError("Invalid delivery encoding");
       const receipts = attempts.map(attempt => attempt.outcome).filter(acceptedDelivery);
       if (conflictingDeliveryReceipts(attempts)) {
-        return { status: "uncertain", reason: "conflicting_receipts", attempts };
+        return { status: "uncertain", reason: "conflicting_receipts", attempts, ...timestamps };
       }
       const strongest = receipts.reduce<(typeof receipts)[number] | undefined>((best, outcome) => !best || confirmationRank(outcome) > confirmationRank(best) ? outcome : best, undefined);
       const outcome = strongest
         ?? attempts.find(attempt => attempt.outcome.status === "uncertain")?.outcome ?? attempts.at(-1)!.outcome;
-      return { ...outcome, attempts };
+      return { ...outcome, attempts, ...timestamps };
     } catch (cause) { throw new DeliveryError("invalid_delivery", "Stored delivery evidence failed validation.", { cause }); }
   }
   start(key: Key, attemptId: string): void {
     const state = this.inspect(key);
     if (state.attempts.some(attempt => attempt.id === attemptId)) throw new DeliveryError("evidence_conflict", "This attempt has already started.");
-    this.write(key, [...state.attempts, { id: attemptId, outcome: { status: "uncertain", reason: "send_started" } }]);
+    this.write(key, [...state.attempts, { id: attemptId, outcome: { status: "uncertain", reason: "send_started" } }], state.updatedAt);
   }
   record(key: Key, attemptId: string, value: DeliveryOutcome): void {
     const outcome = checkedOutcome(value), state = this.inspect(key);
@@ -118,12 +122,15 @@ export class DeliveryLedger {
       if (confirmationRank(outcome) <= confirmationRank(previous)) return;
       outcome.receipt = previous.receipt;
     }
-    attempt.outcome = outcome; this.write(key, state.attempts);
+    if (canonicalJson(previous) === canonicalJson(outcome)) return;
+    attempt.outcome = outcome; this.write(key, state.attempts, state.updatedAt);
   }
-  private write(key: Key, attempts: DeliveryAttempt[]): void {
-    const result = this.database.prepare(`INSERT INTO small_hour_deliveries (scope, id, attempts_json, format_version) VALUES (?, ?, ?, 1)
-      ON CONFLICT (scope, id) DO UPDATE SET attempts_json = excluded.attempts_json`)
-      .run(key.scope, key.id, canonicalJson(attempts));
+  private write(key: Key, attempts: DeliveryAttempt[], previous: number | null): void {
+    const time = recordTime(this.now, previous);
+    const result = this.database.prepare(`INSERT INTO small_hour_deliveries
+      (scope, id, attempts_json, format_version, created_at, updated_at) VALUES (?, ?, ?, 2, ?, ?)
+      ON CONFLICT (scope, id) DO UPDATE SET attempts_json = excluded.attempts_json, updated_at = excluded.updated_at`)
+      .run(key.scope, key.id, canonicalJson(attempts), time, time);
     if (Number(result.changes) !== 1) throw new DeliveryError("invalid_delivery", "Delivery evidence did not commit one row.");
   }
 }

@@ -1,5 +1,15 @@
 # Releases and upgrades
 
+## 0.10.0
+
+Durable receipts, model-step states/results, spending records, task states and delivery states expose `createdAt` and `updatedAt`. New records use an application-supplied clock or `Date.now`; inspection, completed replay and identical reconciliation preserve saved times. Old records retain `null` historical times. These fields describe local persistence, not remote receipt or execution times. See [lifecycle semantics and the storage ERD](storage.md).
+
+The task runner initializes only evidence stores needed by registered step kinds. Local/model workflows do not require delivery storage. Spending remains separately configured and initialized by the application. Completed local task steps now expose their `receipt` alongside `result`.
+
+Stop all users of the affected durable stores and take a verified database backup before calling `initialize()`. Initialization adds nullable timestamp columns and upgrades record formats: receipts/tasks/deliveries 1→2, ordinary model steps 1→3, recovery-enabled model steps 2→4, and spending 2→3. Earlier single-scope spending data first follows the existing scope migration. Scope memberships also gain nullable timestamps. Payloads, IDs, results, charges, uncertain reservations and recovery checkpoints remain intact; no historical creation date or application data is backfilled. Each store's metadata migration rolls back on failure; a runner may have initialized another required store before a later store fails. Keep execution stopped, correct the failure and rerun initialization, or restore the complete backup.
+
+Older readers reject the upgraded records. Mixed-version writers and automatic downgrade are unsupported: stop existing workers before migration, including in-flight model and delivery work. Restoring only the previous package pin is insufficient. Before new work occurs, restore the verified pre-upgrade database and package together; after new work, preserve and reconcile later effects, model calls and delivery evidence before any rollback. Consumers upgrade separately. Model/provider APIs and execution policy are unchanged.
+
 ## 0.9.0
 
 Managed Anthropic connections use only an explicit `apiKey` or `ANTHROPIC_API_KEY`, fix the endpoint to `https://api.anthropic.com`, and disable SDK logging. Missing or blank keys fail during construction; an explicit blank key does not fall back. Ambient bearer tokens, alternate endpoints and SDK profile/configuration no longer select this connection. A nonblank `ANTHROPIC_CUSTOM_HEADERS` fails construction.
@@ -68,10 +78,10 @@ Applications can initially opt a pure model step into fixed attempt/call limits,
 
 ## Install a built artifact
 
-Use the versioned package from the [0.9.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.9.0):
+Use the versioned package from the [0.10.0 release](https://github.com/jingyufanclub/small-hour/releases/tag/v0.10.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.9.0/small-hour-0.9.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.10.0/small-hour-0.10.0.tgz
 ```
 
 Commit the application manifest and lockfile. The lockfile records the artifact URL and integrity; subsequent `npm ci` installs verify those bytes. The release also includes `SHA256SUMS` for checking a downloaded artifact. The package contains built ESM and declarations, so installation needs no source build. No public npm registry publication is configured.
@@ -84,7 +94,7 @@ Consumers and development checks require Node.js 26.10 or later. The application
 - Anthropic refusal now raises `provider_refused`; update callers that previously treated it as `incomplete_stop`. Context exhaustion and pause still raise `incomplete_stop`, with the distinction preserved in the call's `stop` evidence.
 - Keep workflow revisions tied to provider settings, context sources, parsers and acceptance policy. Recovery requires pure callbacks and explicit tool exclusion. It is unavailable for prior steps that did not opt in. Adding task recovery changes the immutable manifest: use a new workflow version and retain old handlers for already-enqueued tasks, even when their model step has not started.
 - Preserve old spending reservations until authoritative reconciliation. Recovery permission does not establish that an earlier call was free.
-- Back up durable data before upgrading. Ordinary model rows remain format 1; recovery-enabled rows use format 2 in the existing table. No backfill runs. Older readers reject format 2, and older spending readers can discard new stop evidence when rewriting records. Retain compatible handlers or stop execution during rollback; restoring an older package alone is insufficient after new records exist.
+- Back up durable data before upgrading and follow the selected release's storage requirements. The current timestamp upgrade changes record formats without inventing historical dates. Stop old writers; restoring an older package alone is insufficient after migration or new work.
 - Verify the application's actual selection, effect, output and delivery boundaries before rollout. Keep the previous known-good dependency pin and a compatible recovery plan.
 
 Provider mechanics are checked with controlled responses. Live model quality, model-specific capabilities and consumer integrations require separate verification. Streaming and audio input remain unavailable.

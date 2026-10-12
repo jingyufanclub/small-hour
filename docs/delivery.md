@@ -34,4 +34,6 @@ Definite outcomes require JSON evidence. Validation rejects malformed or contrad
 
 Inspection exposes the exact product in `steps[0].request`, and attempt outcomes in `steps[0].delivery`. Check task lifecycle separately. Late receipts survive claim loss and cancellation; stale workers cannot finalize tasks. Conflicting receipt identities block recovery. No general exactly-once guarantee is supplied.
 
+Delivery state includes [lifecycle timestamps](storage.md#lifecycle-timestamps) for locally retained evidence. Identical or weaker evidence preserves those times; a stronger confirmation advances the update time. These are not remote acceptance or receipt timestamps.
+
 Payload remains in the task row; `small_hour_deliveries` stores attempt evidence. Retain both and compatible handlers during rollout/rollback. No backfill or second transport authority is added. See [tasks](tasks.md) and [storage and access](security.md).

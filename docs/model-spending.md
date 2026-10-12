@@ -1,6 +1,6 @@
 # Model spending
 
-`SqliteModelSpendStore` supplies persistent admission and settlement through the runtime's `modelCalls` hooks. Import it from `small-hour/durable/sqlite`, provide a synchronous connection, and call `initialize()` outside an existing transaction. It creates or migrates the spending tables; see [upgrade requirements](releases.md#070).
+`SqliteModelSpendStore` supplies persistent admission and settlement through the runtime's `modelCalls` hooks. Import it from `small-hour/durable/sqlite`, provide a synchronous connection, and call `initialize()` outside an existing transaction. It creates or migrates the spending tables; see [upgrade requirements](releases.md#0100).
 
 ## Policy
 
@@ -47,7 +47,7 @@ Refused, malformed, or application-rejected output can still incur cost. Account
 
 ## Inspection and reconciliation
 
-`inspect(callId)` exposes identity, the original quote form, status, charge, provider record, and evidence. Narrow `quote.scopes` when reading the quote union. `inspectBudget(scope)` returns accepted, reserved, unknown, and total amounts, counting each call once in that scope. Do not sum overlapping budgets to calculate total spending; inspect a shared service scope or sum call records once. Obtain IDs from reports, checkpoints, or application queries. Saved accounting remains authoritative if a report still says `unrecorded`.
+`inspect(callId)` exposes identity, the original quote form, status, charge, provider record, evidence and [lifecycle timestamps](storage.md#lifecycle-timestamps). The optional constructor argument `{ now }` supplies the millisecond clock. Narrow `quote.scopes` when reading the quote union. `inspectBudget(scope)` returns accepted, reserved, unknown, and total amounts, counting each call once in that scope. Do not sum overlapping budgets to calculate total spending; inspect a shared service scope or sum call records once. Obtain IDs from reports, checkpoints, or application queries. Saved accounting remains authoritative if a report still says `unrecorded`.
 
 `reconcile(callId, outcome)` accepts `{ status: "accepted", amount, evidence }` or `{ status: "rejected", evidence }`. Evidence is a nonempty application-verified reference. Only reserved/unknown calls may change; exact repeats are safe, conflicting resolutions fail with `settlement_conflict`. Verify old execution cannot create a contradictory charge. Age or cancellation cannot establish non-execution. Reconciliation performs no provider call or workflow continuation.
 
@@ -57,26 +57,4 @@ Admission, settlement, and reconciliation require independent transactions. No t
 
 ## Stored relationships
 
-The call row owns the quote snapshot, monetary exposure and outcome. Scope rows are an indexed membership projection of that quote, written in the same transaction; they contain no separate charge or balance. Settlement updates only the call. Applications retain both tables together and enable SQLite foreign-key checks for database-level reference enforcement.
-
-```mermaid
-erDiagram
-    accTitle: Spending storage
-    accDescr: One spending decision has one or more scope memberships. The decision owns the only charge; memberships project the scopes in its immutable quote.
-    small_hour_model_spend ||--|{ small_hour_model_spend_scopes : indexes
-    small_hour_model_spend {
-        TEXT call_id PK
-        TEXT context_json
-        TEXT quote_json
-        INTEGER reserved_amount
-        TEXT status
-        INTEGER charged_amount "null while unresolved"
-        TEXT record_json "nullable"
-        TEXT resolution_json "nullable"
-        INTEGER format_version
-    }
-    small_hour_model_spend_scopes {
-        TEXT call_id PK,FK
-        TEXT scope PK
-    }
-```
+The call row owns the quote snapshot, monetary exposure and outcome. Scope rows are an indexed membership projection of that quote, written in the same transaction; they contain no separate charge or balance. Settlement updates only the call. Applications retain both tables together and enable SQLite foreign-key checks for database-level reference enforcement. See the [durable storage ERD](storage.md#relationships-and-authority).
