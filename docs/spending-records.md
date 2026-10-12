@@ -1,6 +1,6 @@
 # Spending records and uncertain charges
 
-For setup, start with [money budgets](model-spending.md). This page explains the records used to decide whether another call is affordable.
+For setup, start with [money budgets](model-spending.md).
 
 ## States
 
@@ -12,18 +12,33 @@ For setup, start with [money budgets](model-spending.md). This page explains the
 | `rejected` | Nothing; definite evidence establishes no charge. |
 | `unknown` | The estimate stays reserved because cost is uncertain. |
 
-Admission checks all selected budgets and saves one reservation plus its memberships in an independent `BEGIN IMMEDIATE` transaction. Only a newly committed reservation permits dispatch. Reused call IDs raise `call_exists`; write failure rolls back admission.
+Admission saves each decision and its memberships in an independent `BEGIN IMMEDIATE` transaction. Only a newly committed reservation permits dispatch. Reused call IDs raise `call_exists`; write failure rolls back admission.
 
-Each provider retry gets a new call ID. Settlement records one charge, even if several budgets include it. Exact repeated accounting changes nothing; conflicting accounting fails. A refused or unusable response can still incur cost.
+Each provider retry gets a new call ID. Settlement records one charge across its budgets. Identical accounting changes nothing; conflicting accounting fails. A refused response can still cost money.
+
+## Deny before pricing
+
+`ModelSpendPolicy.quote` can return a quote or this explicit decision:
+
+```ts
+return {
+  denied: true,
+  scopes: [serviceBudgetScope, authenticatedAccountScope],
+  reason: "unknown_model",
+  evidence: "rate-card:2026-10-12",
+};
+```
+
+Your app authenticates scope selection and supplies nonempty reason/evidence strings. Scopes must be nonempty and distinct. No price, estimate, or monetary limit is required or allowed. The saved denial has zero exposure, starts no call, and cannot be settled or reconciled. A thrown policy error instead raises `model_call_admission_failed`; it saves no decision.
 
 ## Inspect
 
-- `inspect(callId)` returns identity, quote, state, charge, provider evidence, reconciliation, and [timestamps](storage-schema.md#lifecycle-timestamps).
+- `inspect(callId)` returns identity, state, charge, evidence, and [timestamps](storage-schema.md#lifecycle-timestamps). Explicit denials have `quote: null` and `denial`; other records retain their quote. Narrow this union before reading quote fields.
 - `inspectBudget(scope)` returns `acceptedAmount`, `reservedAmount`, `unknownAmount`, and `totalAmount`.
 
 Obtain call IDs from execution reports, checkpoints, or your database queries. Saved accounting remains authoritative even if a report still says `unrecorded`.
 
-Quotes accept either `{ scopes: [{ scope, limit }], amount, pricing }` or `{ scope, limit, amount, pricing }`. Mixed forms, repeated scopes, or an empty scope list fail before dispatch. Narrow this union when reading it; extend it with a type intersection.
+Quotes accept `{ scopes: [{ scope, limit }], amount, pricing }` or `{ scope, limit, amount, pricing }`. Mixed decisions and malformed scopes fail before dispatch.
 
 ## Reconcile
 
@@ -34,8 +49,8 @@ Use `reconcile(callId, outcome)` with one outcome:
 | A known charge | `{ status: "accepted", amount, evidence }` |
 | No charge | `{ status: "rejected", evidence }` |
 
-`evidence` is a nonempty string referencing something your app verified. Only reserved/unknown calls may change. Exact repeats are safe; conflicting resolutions raise `settlement_conflict`.
+`evidence` references something your app verified. Only reserved/unknown calls may change. Identical resolutions are safe; conflicting ones raise `settlement_conflict`.
 
-Check that old execution cannot produce a later contradictory charge. Time passing, cancellation, or a missing response cannot prove that no work happened. Reconciliation makes no provider call and does not continue a workflow. Unfinished model steps need their [own recovery decision](model-recovery.md).
+Exclude a later contradictory charge from old execution. Time passing or cancellation cannot prove zero cost. Reconciliation makes no call and does not continue a workflow. Unfinished steps need their [own recovery decision](model-recovery.md).
 
-Keep call records and budget memberships together. Initialization imports no historical spending; deleting records or changing scopes removes budget history. The store saves quotes, identities, usage, and evidence without automatically copying input or selected context. Your app controls retention and access.
+Keep calls and memberships together. Deleting records or changing scopes removes budget history. Input and selected context are not automatically copied. Use private-safe evidence references; your app controls retention and access.

@@ -13,10 +13,24 @@ export interface ModelSpendScope {
 export type ModelSpendQuote = {
   amount: number;
   pricing: unknown;
+  denied?: never;
 } & (ModelSpendScope & { scopes?: never } | { scopes: readonly ModelSpendScope[]; scope?: never; limit?: never });
 
+export interface ModelSpendDenial {
+  denied: true;
+  scopes: readonly string[];
+  reason: string;
+  evidence: string;
+  amount?: never;
+  pricing?: never;
+  scope?: never;
+  limit?: never;
+}
+
+export type ModelSpendDecision = ModelSpendQuote | ModelSpendDenial;
+
 export interface ModelSpendPolicy {
-  quote(context: ModelCallContext): ModelSpendQuote;
+  quote(context: ModelCallContext): ModelSpendDecision;
   charge(usage: Readonly<TokenUsage>, pricing: unknown): number;
 }
 
@@ -25,9 +39,10 @@ export type ModelSpendResolution = { evidence: string } & (
 );
 
 type CallIdentity = Pick<ModelCallContext, "agentId" | "turnId" | "callId" | "provider" | "model" | "attempt" | "hop" | "maxTokens" | "thinking">;
-export type ModelSpendRecord = RecordTimestamps & {
+type QuotedModelSpendRecord = RecordTimestamps & {
   context: CallIdentity;
   quote: ModelSpendQuote;
+  denial?: never;
   record: ModelCallRecord | null;
   resolution: ModelSpendResolution | null;
 } & (
@@ -35,6 +50,16 @@ export type ModelSpendRecord = RecordTimestamps & {
   | { status: "accepted"; chargedAmount: number }
   | { status: "rejected" | "denied"; chargedAmount: 0 }
 );
+
+export type ModelSpendRecord = QuotedModelSpendRecord | (RecordTimestamps & {
+  context: CallIdentity;
+  quote: null;
+  denial: ModelSpendDenial;
+  status: "denied";
+  chargedAmount: 0;
+  record: null;
+  resolution: null;
+});
 
 export interface ModelSpendBudget {
   acceptedAmount: number;
@@ -106,6 +131,22 @@ function scopes(value: ModelSpendQuote): readonly ModelSpendScope[] {
   return [{ scope: value.scope, limit: value.limit }];
 }
 
+function decision(value: ModelSpendDecision): ModelSpendDecision {
+  if (!("denied" in value)) return quote(value);
+  if (value.denied !== true || ["amount", "pricing", "scope", "limit"].some(key => key in value)) {
+    throw new TypeError("An explicit spending denial cannot include a quote.");
+  }
+  text(value.reason); text(value.evidence);
+  if (!Array.isArray(value.scopes) || !value.scopes.length) throw new TypeError("A spending denial needs a nonempty scope list.");
+  const seen = new Set<string>();
+  const selected = value.scopes.map(scope => {
+    text(scope);
+    if (seen.has(scope)) throw new TypeError("A spending denial cannot repeat a scope.");
+    seen.add(scope); return scope;
+  });
+  return JSON.parse(canonicalJson({ denied: true, scopes: selected, reason: value.reason, evidence: value.evidence })) as ModelSpendDenial;
+}
+
 function record(value: Readonly<ModelCallRecord>, context: CallIdentity): ModelCallRecord {
   if (value.callId !== context.callId || value.provider !== context.provider || value.attempt !== context.attempt || value.hop !== context.hop
     || !["not_started", "responded", "rejected", "unknown"].includes(value.status)
@@ -141,12 +182,20 @@ const validAmounts = `typeof(reserved_amount) = 'integer' AND reserved_amount BE
     OR (status = 'accepted' AND typeof(charged_amount) = 'integer' AND charged_amount BETWEEN 0 AND 9007199254740991)
     OR (status IN ('rejected', 'denied') AND charged_amount = 0))`;
 
+function storedRecord(row: Record<string, unknown>, version: 1): QuotedModelSpendRecord;
+function storedRecord(row: Record<string, unknown>, version: 3): ModelSpendRecord;
 function storedRecord(row: Record<string, unknown>, version: 1 | 3): ModelSpendRecord {
   try {
     text(row.call_id);
     if (row.format_version !== version) throw new TypeError("Unsupported spending record.");
-    const context = identity(JSON.parse(String(row.context_json))), offered = quote(JSON.parse(String(row.quote_json)));
-    if (context.callId !== row.call_id || offered.amount !== row.reserved_amount
+    const context = identity(JSON.parse(String(row.context_json))), offered = decision(JSON.parse(String(row.quote_json)));
+    if (context.callId !== row.call_id) throw new TypeError("Spending identity changed.");
+    if (offered.denied) {
+      if (version !== 3 || row.status !== "denied" || row.reserved_amount !== 0 || row.charged_amount !== 0
+        || row.record_json !== null || row.resolution_json !== null) throw new TypeError("Inconsistent spending denial.");
+      return { context, quote: null, denial: offered, status: "denied", chargedAmount: 0, record: null, resolution: null, ...readTimestamps(row) };
+    }
+    if (offered.amount !== row.reserved_amount
       || (version === 1 && (offered.scopes !== undefined || offered.scope !== row.scope))) throw new TypeError("Spending identity changed.");
     const savedRecord = row.record_json === null ? null : record(JSON.parse(String(row.record_json)), context);
     const resolved = row.resolution_json === null ? null : resolution(JSON.parse(String(row.resolution_json)));
@@ -170,8 +219,9 @@ export class SqliteModelSpendStore {
   constructor(private readonly database: SqliteDatabase, options: DurableClockOptions = {}) { this.now = options.now ?? Date.now; }
 
   initialize(): void {
-    this.transaction(() => {
-      const db = this.database;
+    const db = this.database;
+    db.exec("SAVEPOINT small_hour_spending_schema");
+    try {
       db.exec(`CREATE TABLE IF NOT EXISTS small_hour_model_spend (
       call_id TEXT PRIMARY KEY NOT NULL,
       context_json TEXT NOT NULL,
@@ -201,14 +251,19 @@ export class SqliteModelSpendStore {
             .get(...(after === null ? [] : [after])) as Record<string, unknown> | undefined;
           if (!row) break;
           const saved = storedRecord(row, 1);
-          this.insertScopes(saved.context.callId, saved.quote, null);
+          this.insertScopes(saved.context.callId, scopes(saved.quote).map(value => value.scope), null);
           changed(db.prepare("UPDATE small_hour_model_spend SET format_version = 2 WHERE call_id = ?").run(saved.context.callId));
           after = saved.context.callId;
         }
         db.exec("DROP INDEX IF EXISTS small_hour_model_spend_scope; ALTER TABLE small_hour_model_spend DROP COLUMN scope");
       }
       initializeTimestamps(db, "small_hour_model_spend", [[2, 3]]);
-    });
+      db.exec("RELEASE SAVEPOINT small_hour_spending_schema");
+    } catch (cause) {
+      try { db.exec("ROLLBACK TO SAVEPOINT small_hour_spending_schema"); db.exec("RELEASE SAVEPOINT small_hour_spending_schema"); }
+      catch (rollback) { throw new AggregateError([cause, rollback], "Spending schema setup could not be rolled back.", { cause }); }
+      throw cause;
+    }
   }
 
   hooks(policy: ModelSpendPolicy): ModelCallHooks {
@@ -221,19 +276,21 @@ export class SqliteModelSpendStore {
         const call = identity(context);
         return this.transaction(() => {
           if (this.inspect(call.callId)) throw new ModelSpendError("call_exists", "This call already has a spending decision.");
-          const offered = quote(synchronous(policy.quote(context)));
-          let admitted = true;
-          for (const { scope, limit } of scopes(offered)) {
-            const total = this.inspectBudget(scope).totalAmount;
-            if (total > limit || offered.amount > limit - total) admitted = false;
+          const offered = decision(synchronous(policy.quote(context)));
+          let admitted = !offered.denied;
+          if (!offered.denied) {
+            for (const { scope, limit } of scopes(offered)) {
+              const total = this.inspectBudget(scope).totalAmount;
+              if (total > limit || offered.amount > limit - total) admitted = false;
+            }
           }
           const time = recordTime(this.now);
           changed(this.database.prepare(`INSERT INTO small_hour_model_spend
             (call_id, context_json, quote_json, reserved_amount, status, charged_amount, format_version, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, 3, ?, ?)`)
-            .run(call.callId, canonicalJson(call), canonicalJson(offered), offered.amount,
+            .run(call.callId, canonicalJson(call), canonicalJson(offered), offered.denied ? 0 : offered.amount,
               admitted ? "reserved" : "denied", admitted ? null : 0, time, time));
-          this.insertScopes(call.callId, offered, time);
+          this.insertScopes(call.callId, offered.denied ? offered.scopes : scopes(offered).map(value => value.scope), time);
           return admitted;
         });
       },
@@ -257,12 +314,12 @@ export class SqliteModelSpendStore {
     text(callId);
     const row = this.database.prepare("SELECT * FROM small_hour_model_spend WHERE call_id = ?").get(callId) as Record<string, unknown> | undefined;
     if (row === undefined) return undefined;
-    const saved = storedRecord(row, 3), selected = scopes(saved.quote);
+    const saved = storedRecord(row, 3), selected = saved.quote === null ? saved.denial.scopes : scopes(saved.quote).map(value => value.scope);
     const indexed = this.database.prepare(`SELECT COUNT(*) AS total,
       COALESCE(SUM(CASE WHEN scope IN (${selected.map(() => "?").join(",")}) THEN 1 ELSE 0 END), 0) AS matched
-      FROM small_hour_model_spend_scopes WHERE call_id = ?`).get(...selected.map(value => value.scope), callId) as { total: number; matched: number };
+      FROM small_hour_model_spend_scopes WHERE call_id = ?`).get(...selected, callId) as { total: number; matched: number };
     if (indexed.total !== selected.length || indexed.matched !== selected.length) {
-      throw new ModelSpendError("invalid_record", "The spending scope index does not match its quote.");
+      throw new ModelSpendError("invalid_record", "The spending scope index does not match its decision.");
     }
     return saved;
   }
@@ -304,8 +361,8 @@ export class SqliteModelSpendStore {
     return saved;
   }
 
-  private insertScopes(callId: string, offered: ModelSpendQuote, time: number | null): void {
-    for (const { scope } of scopes(offered)) {
+  private insertScopes(callId: string, selected: readonly string[], time: number | null): void {
+    for (const scope of selected) {
       changed(this.database.prepare("INSERT INTO small_hour_model_spend_scopes (call_id, scope, created_at, updated_at) VALUES (?, ?, ?, ?)")
         .run(callId, scope, time, time));
     }

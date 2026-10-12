@@ -38,14 +38,16 @@ A **scope** identifies a shared allowance. One call must fit every selected scop
 ```mermaid
 flowchart LR
     accTitle: A budget check before each model attempt
-    accDescr: Reserve the estimated amount before calling the provider. Settle known usage afterward or keep the reservation when the cost is uncertain.
+    accDescr: Save an explicit policy denial or check allowances and commit a reservation before calling the provider. Settle known usage afterward or keep an uncertain reservation.
+    policy["App policy"] -->|Quote| check
+    policy -->|Explicit denial| deny
     check["Check all allowances"] -->|Enough remaining| reserve["Save one reservation"]
-    check -->|Insufficient| deny["Deny; no model call"]
+    check -->|Insufficient| deny["Save denial; no model call"]
     reserve --> providerCall["Call model"]
     providerCall --> settle["Record charge, or keep uncertain reservation"]
 ```
 
-A denied reservation raises `model_call_denied`. Storage failure also prevents dispatch. Earlier charges remain; reservations never expire automatically. Every provider retry needs its own reservation.
+A denial raises `model_call_denied`. Storage failure also prevents dispatch. Earlier charges remain; reservations never expire automatically. Every provider retry needs its own reservation. When pricing is unavailable, return an [explicit policy denial](spending-records.md#deny-before-pricing) to save the reason without fabricating a quote.
 
 ## Your pricing functions
 
@@ -54,7 +56,7 @@ A denied reservation raises `model_call_denied`. Storage failure also prevents d
 
 Estimate the complete request: input, selected context, accumulated tool results, images, and output/reasoning allowance. **The hook's explicit input does not include selected memory or accumulated tool results.** Your estimator must account for them separately. An underestimate can exceed the allowance; the full charge is retained and constrains later calls.
 
-Callbacks must cause no effects or transactions. Initialize and settle outside existing transactions. Authenticate scope selection and keep scopes stable across retries.
+Callbacks must cause no effects or transactions. Schema initialization can join your app's setup transaction; commit setup before execution. Admission, settlement, and reconciliation require independent transactions. Authenticate scope selection and keep scopes stable across retries.
 
 ## Inspect or resolve uncertain cost
 

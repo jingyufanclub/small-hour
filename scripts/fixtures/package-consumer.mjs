@@ -128,5 +128,23 @@ if (!process.argv.includes("--core-only")) {
     spending.reconcile(pending.modelCalls[0].callId, settlement); spending.reconcile(pending.modelCalls[0].callId, settlement);
     for (const { scope } of scopes) assert.equal(spending.inspectBudget(scope).totalAmount, 3);
     assert.equal(db.prepare("SELECT sum(charged_amount) amount FROM small_hour_model_spend").get().amount, 3);
+    db.exec("BEGIN; CREATE TABLE application_setup (id TEXT PRIMARY KEY); INSERT INTO application_setup VALUES ('prepared')");
+    spending.initialize();
+    db.exec("ROLLBACK");
+    assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'application_setup'").get(), undefined);
+    const denied = { denied: true, scopes: scopes.map(value => value.scope), reason: "unknown_model", evidence: "prices-v1" };
+    let deniedCall;
+    await assert.rejects(new SmallHourRuntime({ persona: new StaticPersonaSource("Process."), memory: new EmptyMemorySource(),
+      modelCalls: spending.hooks({ quote: () => denied, charge: () => assert.fail("Denial must not need a price") }),
+      provider: { name: "fixture", model: "unpriced", async complete() { paidCalls++; return answer("Unexpected."); } },
+    }).turn(input), error => {
+      assert.equal(error.code, "model_call_denied"); deniedCall = error.report.modelCalls[0].callId; return true;
+    });
+    db.close(); db = new DatabaseSync(path); spending = new SqliteModelSpendStore(db); spending.initialize();
+    const savedDenial = spending.inspect(deniedCall);
+    assert.equal(savedDenial.quote, null); assert.deepEqual(savedDenial.denial, denied);
+    assert.equal(savedDenial.status, "denied"); assert.equal(savedDenial.chargedAmount, 0);
+    for (const { scope } of scopes) assert.equal(spending.inspectBudget(scope).totalAmount, 3);
+    assert.equal(paidCalls, 1);
   } finally { db.close(); }
 }

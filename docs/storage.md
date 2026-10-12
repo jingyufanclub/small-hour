@@ -20,7 +20,9 @@ These records help execution recover. Your app still owns its documents, users, 
 
 You supply an existing SQLite connection. Import helpers from `small-hour/durable/sqlite`; call a helper's `initialize()` to create or upgrade its tables. No separate database service or background worker is installed.
 
-The task runner initializes its task table plus the stores required by its registered step types. A workflow with only local and model steps needs no delivery table. Your app initializes spending separately.
+Spending schema setup can share your app's setup transaction: both commit or roll back together. Commit setup before starting model work. Each spending admission and settlement still commits independently.
+
+The task runner initializes its task table and stores required by registered steps. Local/model workflows need no delivery table. Your app initializes spending separately.
 
 ## After interruption
 
