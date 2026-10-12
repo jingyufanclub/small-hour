@@ -60,4 +60,4 @@ Callbacks must cause no effects or transactions. Initialize and settle outside e
 
 `inspectBudget(scope)` reports charged, reserved, unknown, and total amounts. `inspect(callId)` shows the saved quote, outcome, and evidence. Do not sum overlapping scopes as total spending.
 
-`reconcile(callId, outcome)` resolves reserved/unknown calls using verified evidence. Output refusal can still cost money; timeout or cancellation proves no refund. See [spending records](spending-records.md) for settlement rules. Completed model-step replay adds no charge.
+`reconcile(callId, outcome)` resolves reserved/unknown calls using verified evidence. Output refusal can still cost money. Timeout or cancellation alone cannot establish whether a call was charged; keep uncertain amounts reserved until your app verifies the outcome. See [spending records](spending-records.md) for settlement rules. Completed model-step replay adds no charge.
