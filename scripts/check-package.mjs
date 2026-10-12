@@ -23,7 +23,7 @@ try {
   workspace = mkdtempSync(join(tmpdir(), "small-hour-package-"));
   const stage = join(workspace, "source"), packed = join(workspace, "packed"), consumer = join(workspace, "consumer");
   for (const directory of [stage, packed, consumer]) mkdirSync(directory);
-  for (const entry of ["src", "docs", "README.md", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json"]) {
+  for (const entry of ["src", "docs", "README.md", "LICENSE", "package.json", "package-lock.json", "tsconfig.json", "tsconfig.build.json"]) {
     cpSync(join(source, entry), join(stage, entry), { recursive: true });
   }
   assert.equal(existsSync(join(stage, "dist")), false, "Package staging must start without dist");
@@ -31,6 +31,8 @@ try {
   const lock = JSON.parse(readFileSync(join(stage, "package-lock.json"), "utf8"));
   assert.equal(lock.version, manifest.version, "The package lock must match the release version");
   assert.equal(lock.packages[""].version, manifest.version, "The root lock entry must match the release version");
+  assert.equal(manifest.license, "Apache-2.0");
+  assert.equal(lock.packages[""].license, manifest.license, "The package lock must match the license");
   const env = { ...process.env };
   delete env.NODE_PATH;
   delete env.NODE_OPTIONS;
@@ -52,8 +54,9 @@ try {
   const artifact = results[0];
   assert.equal(artifact.name, manifest.name); assert.equal(artifact.version, manifest.version);
   const files = new Set(artifact.files.map(file => file.path));
-  for (const file of files) assert.ok(file === "README.md" || file === "package.json" || /^(dist|docs)\//.test(file), `Unexpected package file: ${file}`);
+  for (const file of files) assert.ok(["README.md", "LICENSE", "package.json"].includes(file) || /^(dist|docs)\//.test(file), `Unexpected package file: ${file}`);
   assert.ok(files.has("README.md") && files.has("package.json") && [...files].some(file => file.startsWith("docs/")), "Package documentation is missing");
+  assert.ok(files.has("LICENSE"), "Package license is missing");
   const subpaths = [".", "./providers/anthropic", "./providers/openai", "./providers/openai-compatible", "./durable/sqlite"];
   assert.deepEqual(Object.keys(manifest.exports).sort(), [...subpaths].sort(), "The five public exports must remain available");
   for (const subpath of subpaths) for (const condition of ["types", "import"]) {
@@ -76,6 +79,8 @@ try {
   assert.equal(realpathSync(installed), join(realpathSync(consumer), "node_modules", manifest.name));
   const installedManifest = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
   assert.equal(installedManifest.version, manifest.version); assert.deepEqual(installedManifest.exports, manifest.exports);
+  assert.equal(installedManifest.license, manifest.license);
+  assert.deepEqual(readFileSync(join(installed, "LICENSE")), readFileSync(join(source, "LICENSE")), "Installed license must match the source");
   for (const filename of ["package-consumer.mjs", "package-consumer.ts"]) copyFileSync(join(source, "scripts", "fixtures", filename), join(consumer, filename));
   run(process.execPath, ["package-consumer.mjs", ...(coreOnly ? ["--core-only"] : [])], consumer);
   run(process.execPath, [join(consumer, "node_modules", "typescript", "bin", "tsc"), "--noEmit", "--strict", "--target", "ES2022",

@@ -156,3 +156,9 @@ Provider retries are owned by the runtime; SDK retries are disabled. The optiona
 | Installation, compatibility and rollback | [Releases](docs/releases.md) |
 
 Run `npm run check` for type checking, behavioral tests, and the build. `npm run check:package` verifies a clean installation of the packed artifact.
+
+## License
+
+Copyright 2026 Jing Yu.
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
