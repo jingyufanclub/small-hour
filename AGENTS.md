@@ -12,7 +12,7 @@ Keep ownership explicit:
 - Never add a growing transcript store. Memory is supplied fresh by the host on every turn.
 - Tool implementations are application-owned. Local transaction callbacks must be synchronous database work. Remote effects require explicit idempotency or reconciliation contracts.
 - Keep provider-specific code under `src/providers/`.
-- Do not add a publication license until the repository owner chooses one.
+- Preserve Apache-2.0 licensing and required attribution in source and packaged distributions.
 
 Run `npm run check` before calling a change complete.
 
