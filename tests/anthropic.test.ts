@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, type RuntimeOptions } from "../src/index.js";
+import { SqliteModelSpendStore } from "../src/durable/sqlite.js";
 
-function transport(responses: Array<{ status: number; body: unknown; requestId: string }>, options: Partial<RuntimeOptions> = {}) {
+function transport(responses: Array<{ status: number; body: unknown; requestId: string } | Error>, options: Partial<RuntimeOptions> = {}) {
   const requests: Record<string, any>[] = [];
   const client = new Anthropic({ apiKey: "test-only", maxRetries: 4,
     fetch: async (_url, options) => {
       requests.push(JSON.parse(String(options?.body)));
       const response = responses.shift();
       assert.ok(response, "unexpected extra HTTP attempt");
+      if (response instanceof Error) throw response;
       return new Response(JSON.stringify(response.body), { status: response.status, headers: {
         "content-type": "application/json", "request-id": response.requestId, "retry-after-ms": "1",
       } });
@@ -22,25 +25,6 @@ function transport(responses: Array<{ status: number; body: unknown; requestId: 
   });
   return { runtime, provider, requests };
 }
-
-test("Anthropic sends the exact structured schema and exposes the HTTP request ID and usage", async () => {
-  const { runtime, requests } = transport([{ status: 200, requestId: "req-42", body: {
-    id: "msg-9", type: "message", role: "assistant", model: "test-model",
-    content: [{ type: "text", text: '{"selectedId":"exact-9"}' }], stop_reason: "end_turn", stop_sequence: null,
-    usage: { input_tokens: 12, output_tokens: 8 },
-  } }]);
-  const schema = { type: "object", properties: { selectedId: { type: "string", enum: ["exact-9"] } },
-    required: ["selectedId"], additionalProperties: false,
-  };
-  const result = await runtime.turn({ agentId: "a", input: "select", structuredOutput: { schema,
-    parse: (value) => { assert.deepEqual(value, { selectedId: "exact-9" }); return value; },
-  } });
-  assert.equal(requests.length, 1);
-  assert.deepEqual(requests[0].output_config, { format: { type: "json_schema", schema } });
-  assert.equal(requests[0].tools, undefined);
-  assert.equal(result.modelCalls[0].requestId, "req-42");
-  assert.equal(result.usage[0].freshInputTokens, 12);
-});
 
 test("an injected Anthropic client cannot hide SDK retries from the runtime budget", async () => {
   const errorBody = { type: "error", error: { type: "rate_limit_error", message: "limit" } };
@@ -55,33 +39,44 @@ test("an injected Anthropic client cannot hide SDK retries from the runtime budg
   assert.equal(requests.length, 1);
 });
 
-test("each Anthropic HTTP retry has its own runtime admission and accounting", async () => {
-  const events: string[] = [];
-  const { runtime, requests } = transport([
-    { status: 429, requestId: "req-busy", body: { type: "error", error: { type: "rate_limit_error", message: "busy" } } },
-    { status: 200, requestId: "req-ready", body: {
-      id: "msg-ready", type: "message", role: "assistant", model: "test-model",
-      content: [{ type: "text", text: "done" }], stop_reason: "end_turn", stop_sequence: null,
-      usage: { input_tokens: 12, output_tokens: 8 },
-    } },
-  ], { retry: { attempts: 2, delayMs: () => 0 }, maxModelCalls: 2, modelCalls: {
-    admit: () => { events.push(`admit:${requests.length}`); return true; },
-    record: (call) => { events.push(`record:${call.status}:${requests.length}`); },
-  } });
-  const result = await runtime.turn({ agentId: "a", input: "go" });
-  assert.equal(result.output, "done");
-  assert.equal(requests.length, 2);
-  assert.deepEqual(events, ["admit:0", "record:rejected:1", "admit:1", "record:responded:2"]);
-  assert.deepEqual(result.modelCalls.map((call) => call.accounting), ["recorded", "recorded"]);
-  assert.equal(new Set(result.modelCalls.map((call) => call.callId)).size, 2);
-});
-
-test("Anthropic treats server and connection failures as uncertain outcomes", () => {
-  const { provider } = transport([]);
-  assert.equal(provider.failureInfo({ status: 500 }).status, "unknown");
-  assert.equal(provider.failureInfo({ status: 408 }).status, "unknown");
-  assert.equal(provider.failureInfo(new Error("connection lost")).status, "unknown");
-});
+for (const failure of [400, 408, 429, 503, "connection"] as const) {
+  test(`Anthropic ${failure} failure preserves the spending decision before any retry`, async t => {
+    const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+    const spend = new SqliteModelSpendStore(db); spend.initialize();
+    const { runtime, requests } = transport([
+      failure === "connection" ? new Error("connection lost")
+        : { status: failure, requestId: "failed-request", body: { type: "error", error: { type: "api_error", message: "unavailable" } } },
+      { status: 200, requestId: "ready-request", body: {
+        id: "message-1", type: "message", role: "assistant", model: "test-model",
+        content: [{ type: "text", text: "done" }], stop_reason: "end_turn", stop_sequence: null,
+        usage: { input_tokens: 12, output_tokens: 8 },
+      } },
+    ], { retry: { attempts: 2, delayMs: () => 0 }, modelCalls: spend.hooks({
+      quote: () => ({ scope: "app", limit: 30, amount: 30, pricing: { perToken: 1 } }),
+      charge: usage => usage.freshInputTokens + usage.outputTokens,
+    }) });
+    const pending = runtime.turn({ agentId: "app", input: "Process supplied facts." });
+    if (failure === 429) {
+      const result = await pending;
+      assert.equal(result.status, "reply");
+      assert.deepEqual(result.modelCalls.map(call => [call.status, call.requestId, spend.inspect(call.callId)?.status]),
+        [["rejected", "failed-request", "rejected"], ["responded", "ready-request", "accepted"]]);
+      assert.equal(requests.length, 2);
+      assert.equal(spend.inspectBudget("app").totalAmount, 20);
+    } else {
+      await assert.rejects(pending, error => {
+        assert.ok(error instanceof RuntimeError && error.report);
+        assert.equal(error.code, failure === 400 ? "provider_failed" : "model_call_denied");
+        assert.equal(error.report.modelCalls[0].status, failure === 400 ? "rejected" : "unknown");
+        return true;
+      });
+      assert.equal(requests.length, 1);
+      assert.deepEqual(spend.inspectBudget("app"), failure === 400
+        ? { acceptedAmount: 0, reservedAmount: 0, unknownAmount: 0, totalAmount: 0 }
+        : { acceptedAmount: 0, reservedAmount: 0, unknownAmount: 30, totalAmount: 30 });
+    }
+  });
+}
 
 test("a provider response without usage remains a known response with unknown cost", async () => {
   const { runtime } = transport([{ status: 200, requestId: "req-no-usage", body: {

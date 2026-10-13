@@ -2,7 +2,7 @@ import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
+import { EmptyMemorySource, MaxLengthOutput, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelProvider, type ProviderResponse, type RuntimeOptions,
   type TraceEvent } from "../src/index.js";
 import { callbackGate, deadlineClock } from "./deadline-clock.js";
@@ -67,14 +67,31 @@ test("one trace joins actual model requests, parsed tool input, results, and fin
 
 test("metadata capture omits content and untraced execution keeps its existing report shape", async () => {
   const events: TraceEvent[] = [];
-  const provider: ModelProvider = { name: "fixture", capabilities: { images: true }, async complete() { return text("private output"); } };
+  let calls = 0;
+  const provider: ModelProvider = { name: "fixture", capabilities: { images: true }, async complete(request) {
+    request.trace?.request({ context: "private provider request" });
+    request.trace?.response({ reasoning: "private provider response" });
+    return ++calls === 1 ? use("read-1", "read", { query: "private tool input" }) : text("private output");
+  } };
   const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
-  const result = await runtime(provider, events, { tracing: { sink: { record: event => { events.push(event); } } } })
-    .turn({ agentId: "agent", input: [{ type: "text", text: "private input" }, { type: "image", mediaType: "image/png", data: image }] });
+  const result = await runtime(provider, events, {
+    tracing: { sink: { record: event => { events.push(event); } } },
+    memory: { load: async () => [{ role: "user", content: "private memory" }] },
+    tools: new ToolRegistry([{ name: "read", description: "Read", inputSchema: {}, mode: "read", parse: parseObject,
+      execute: () => ({ result: "private tool result" }) }]),
+  }).turn({ agentId: "agent", allowedTools: ["read"],
+    input: [{ type: "text", text: "private input" }, { type: "image", mediaType: "image/png", data: image }] });
   assert.ok(result.trace);
-  assert.ok(events.some(event => event.content?.status === "omitted"));
-  assert.doesNotMatch(JSON.stringify(events), /private input|private output|private instructions/);
+  assert.equal(calls, 2);
+  assert.equal(result.output, "private output");
+  assert.doesNotMatch(JSON.stringify(events), /private/);
   assert.equal(JSON.stringify(events).includes(image), false);
+  for (const type of ["model.request", "model.response", "tool.started", "tool.result", "turn.finished"]) {
+    const selected = events.filter(event => event.type === type);
+    assert.ok(selected.length > 0, `${type} must still be observable`);
+    assert.ok(selected.every(event => event.content?.status === "omitted"));
+  }
+  assert.ok(events.some(event => event.type === "model.request" && event.format === "provider"));
   const plain = await runtime(provider, [], { tracing: undefined }).turn({ agentId: "agent", input: "private input" });
   assert.equal("trace" in plain, false);
   assert.equal("trace" in plain.modelCalls[0], false);
@@ -109,13 +126,17 @@ test("failed tracing cannot mutate requests, authorize denied writes, or replay 
 });
 
 test("each retried provider attempt has a distinct span and its original call outcome", async () => {
-  const events: TraceEvent[] = []; let calls = 0;
-  const result = await runtime({ name: "fixture", async complete() {
-    if (++calls === 1) throw new Error("temporary private detail");
+  const events: TraceEvent[] = [], sent: unknown[] = [];
+  const result = await runtime({ name: "fixture", async complete(request) {
+    sent.push(structuredClone({ messages: request.messages, system: request.system, tools: request.tools, maxTokens: request.maxTokens }));
+    if (sent.length === 1) throw new Error("temporary private detail");
     return text();
   }, isRetryable: () => true }, events, { retry: { attempts: 2, delayMs: () => 0 } })
     .turn({ agentId: "agent", input: "retry", trace: { traceId } });
   const finished = events.filter(event => event.type === "model.finished");
+  assert.equal(result.status, "reply");
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], sent[0]);
   assert.equal(finished.length, 2);
   assert.deepEqual(finished.map(event => event.type === "model.finished" && event.record.status), ["unknown", "responded"]);
   assert.notEqual(finished[0].spanId, finished[1].spanId);
@@ -145,7 +166,7 @@ test("original and compacted tool results remain distinguishable and over-limit 
   const visible = events.find(event => event.type === "tool.result" && event.stage === "model")!;
   assert.equal(captured(visible), '{"summary":"selected facts"}');
   assert.ok(result.trace && result.trace.contentOmissions > 0);
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
 });
 
 test("asynchronous sink rejection is observed without delaying or failing a turn", async () => {
@@ -154,7 +175,7 @@ test("asynchronous sink rejection is observed without delaying or failing a turn
     tracing: { sink: { record: () => Promise.reject(new Error("export failed")) } },
   }).turn({ agentId: "agent", input: "finish" });
   await setImmediate();
-  assert.equal(calls, 1); assert.equal(result.output, "done");
+  assert.equal(calls, 1); assert.equal(result.status, "reply");
   assert.ok(result.trace && result.trace.exportFailures > 0);
 });
 
@@ -208,9 +229,11 @@ test("a rejected final output and failed export preserve a completed effect with
     tracing: { sink: { record: event => { events.push(event); throw new Error("offline"); } } },
     tools: new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseObject, execute: (_input, context) => {
       writes++; context.recordReceipt("committed-1"); return { saved: true };
-    } }]), outputPolicy: { apply: output => ({ accepted: false, output, issues: ["policy"] }) },
+    } }]), outputPolicy: new MaxLengthOutput(8),
   }).turn({ allowedTools: ["write"], agentId: "agent", input: "write" });
   assert.equal(writes, 1); assert.equal(calls, 2); assert.equal(result.status, "rejected");
+  assert.equal(result.accepted, false);
+  assert.equal(result.output, "rejected output");
   assert.deepEqual(result.toolCalls[0].receiptIds, ["committed-1"]);
   const check = events.find(event => event.type === "check.finished");
   assert.ok(check?.type === "check.finished"); assert.equal(check.verdict, "rejected");
@@ -242,7 +265,7 @@ test("a pending asynchronous sink does not extend the turn or start an export wo
   const result = await runtime({ name: "fixture", async complete() { return text(); } }, [], {
     tracing: { sink: { record: () => new Promise<void>(() => {}) } },
   }).turn({ agentId: "agent", input: "finish" });
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
   assert.ok(result.trace && result.trace.exportFailures === result.trace.eventCount);
 });
 

@@ -319,8 +319,8 @@ test("revoked permission after a model response prevents the next local effect",
     ? { status: "allow" } : { status: "rejected", reason: "permission_revoked" } });
   const app = f.open([definition]); app.runner.enqueue(task, schedule);
   const result = await app.runner.runNext();
-  assert.equal(result?.status, "rejected"); assert.equal(result?.reason, "permission_revoked");
   assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 1);
+  assert.equal(result?.status, "rejected"); assert.equal(result?.reason, "permission_revoked");
   assert.equal(result?.steps[0].status, "completed");
   assert.equal(result?.steps[1].model?.report.modelCalls[0].status, "responded");
   assert.equal(result?.steps[2].status, "not_started");

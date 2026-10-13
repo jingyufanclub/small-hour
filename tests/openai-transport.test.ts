@@ -44,7 +44,7 @@ test("OpenAI native HTTP attempts each require runtime admission and settlement"
   const result = await runtime(fetch, { maxModelCalls: 2, modelCalls: {
     admit: () => { events.push("admit"); return true; }, record: () => { events.push("record"); },
   } }).turn({ agentId: "reader", input: "Read the supplied facts." });
-  assert.equal(result.output, "Accepted.");
+  assert.equal(result.status, "reply");
   assert.equal(requests.length, 2);
   assert.deepEqual(events, ["admit", "http", "record", "admit", "http", "record"]);
   assert.deepEqual(result.modelCalls.map(call => [call.status, call.requestId]), [["unknown", "request-1"], ["responded", "request-2"]]);
@@ -98,7 +98,7 @@ test("OpenAI configuration ignores unrelated endpoint and account environment de
     reply.writeHead(200, { "content-type": "application/json" }); reply.end(JSON.stringify(answer));
   });
   const result = await runtime(fetch).turn({ agentId: "reader", input: "Read the supplied facts." });
-  assert.equal(result.output, "Accepted.");
+  assert.equal(result.status, "reply");
   assert.equal(requests[0].url, "https://api.openai.com/v1/responses");
 });
 

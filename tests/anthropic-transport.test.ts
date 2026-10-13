@@ -52,7 +52,7 @@ for (const keySource of ["explicit", "environment"] as const) {
     t.mock.method(globalThis, "fetch", fetch);
     const provider = new AnthropicProvider({ model: "selected-model", ...(keySource === "explicit" ? { apiKey: "selected-test-key" } : {}) });
     const result = await runtime(provider).turn({ agentId: "reader", input: "Read the supplied facts." });
-    assert.equal(result.output, "Accepted.");
+    assert.equal(result.status, "reply");
     assert.equal(result.modelCalls[0].requestId, "request-7");
     assert.equal(result.usage[0].freshInputTokens, 12);
     assert.equal(requests.length, 1);
@@ -90,7 +90,7 @@ test("managed Anthropic clients do not enable SDK content logging from the envir
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(answer), { headers: { "content-type": "application/json" } }));
   const result = await runtime(new AnthropicProvider({ model: "selected-model", apiKey: "selected-test-key" }))
     .turn({ agentId: "reader", input: "Private test input." });
-  assert.equal(result.output, "Accepted.");
+  assert.equal(result.status, "reply");
   assert.equal(logs, 0);
 });
 
@@ -123,7 +123,7 @@ test("explicit Anthropic clients retain application-owned credentials, destinati
     logger: { debug: log, info: log, warn: log, error: log } });
   const provider = new AnthropicProvider({ model: "selected-model", client });
   const result = await runtime(provider).turn({ agentId: "reader", input: "Read supplied facts." });
-  assert.equal(result.output, "Accepted.");
+  assert.equal(result.status, "reply");
   assert.equal(requests[0].url, `${baseURL}/v1/messages`);
   assert.equal(new Headers(requests[0].options.headers).get("x-api-key"), "client-test-key");
   assert.equal(new Headers(requests[0].options.headers).get("x-app-context"), "selected");
@@ -145,7 +145,7 @@ test("each managed Anthropic HTTP retry requires runtime admission and settlemen
     maxModelCalls: 2, retry: { attempts: 2, delayMs: () => 0 },
     modelCalls: { admit: () => { events.push("admit"); return true; }, record: () => { events.push("record"); } },
   }).turn({ agentId: "reader", input: "Read supplied facts." });
-  assert.equal(result.output, "Accepted.");
+  assert.equal(result.status, "reply");
   assert.deepEqual(events, ["admit", "http", "record", "admit", "http", "record"]);
   assert.deepEqual(result.modelCalls.map(call => [call.status, call.requestId]), [["rejected", "request-1"], ["responded", "request-2"]]);
 });

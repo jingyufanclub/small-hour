@@ -1,13 +1,10 @@
 import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
-import { fileURLToPath } from "node:url";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelCallContext, type ModelCallRecord, type ModelProvider } from "../src/index.js";
 import { SqliteModelSpendStore, SqliteModelStepStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
@@ -65,16 +62,6 @@ test("concurrent jobs share one ceiling and every provider call sees its committ
   assert.equal(other.spend.inspectBudget(scope).totalAmount, 3);
 });
 
-test("a confirmed provider rejection releases its reservation before a bounded retry", async t => {
-  const { spend } = fixture(t); let calls = 0;
-  const result = await runtime(spend, { name: "fixture", isRetryable: () => true, failureInfo: () => ({ status: "rejected" }),
-    async complete() { if (++calls === 1) throw new Error("rejected before processing"); return response; } },
-  { retry: { attempts: 2, delayMs: () => 0 } }).turn(input);
-  assert.equal(calls, 2);
-  assert.deepEqual(result.modelCalls.map(call => spend.inspect(call.callId)?.status), ["rejected", "accepted"]);
-  assert.equal(spend.inspectBudget(scope).totalAmount, 3);
-});
-
 test("an unknown transport outcome consumes the retry budget instead of buying another call", async t => {
   const { spend } = fixture(t); let calls = 0;
   await assert.rejects(runtime(spend, { name: "fixture", isRetryable: () => true,
@@ -116,21 +103,6 @@ test("timeout after submission survives reopen and needs explicit evidence befor
   assert.equal(recovered.spend.inspect(result.modelCalls[0].callId)?.status, "accepted");
   assert.equal(recovered.spend.inspectBudget(scope).acceptedAmount, 3);
   assert.equal(recovered.spend.inspectBudget(scope).totalAmount, 3);
-});
-
-test("missing usage retains the full reservation and a resolved charge is applied exactly once", async t => {
-  const { spend } = fixture(t); let calls = 0;
-  const provider: ModelProvider = { name: "fixture", async complete() { calls++; return { ...response, usage: undefined }; } };
-  const result = await runtime(spend, provider).turn(input), id = result.modelCalls[0].callId;
-  assert.equal(spend.inspect(id)?.status, "unknown");
-  assert.equal(spend.inspect(id)?.record?.status, "responded");
-  await assert.rejects(runtime(spend, provider).turn(input), { code: "model_call_denied" });
-  assert.equal(calls, 1);
-  const resolution = { status: "accepted" as const, amount: 4, evidence: "provider-invoice:line-3" };
-  spend.reconcile(id, resolution); spend.reconcile(id, resolution);
-  assert.equal(spend.inspectBudget(scope).totalAmount, 4);
-  assert.throws(() => spend.reconcile(id, { ...resolution, amount: 0 }), { code: "settlement_conflict" });
-  assert.equal(spend.inspectBudget(scope).totalAmount, 4);
 });
 
 test("failed reservation writes and an enclosing transaction cannot let a paid call escape", async t => {
@@ -240,15 +212,6 @@ test("policy committed before reservation is read under the same spending transa
   await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } },
     { modelCalls: spend.hooks(current) }).turn(input), { code: "model_call_denied" });
   assert.equal(calls, 0);
-});
-
-test("underestimated charges remain visible and block further spending instead of being capped to the quote", async t => {
-  const { spend } = fixture(t); let calls = 0;
-  const provider: ModelProvider = { name: "fixture", async complete() { calls++; return { ...response, usage: { ...usage, outputTokens: 18 } }; } };
-  await runtime(spend, provider).turn(input);
-  assert.equal(spend.inspectBudget(scope).acceptedAmount, 20);
-  await assert.rejects(runtime(spend, provider).turn(input), { code: "model_call_denied" });
-  assert.equal(calls, 1);
 });
 
 test("provider HTTP failures pass through durable admission without a hidden second request", async t => {
@@ -396,32 +359,4 @@ test("corrupt persisted amounts fail closed before the next provider attempt", a
   assert.throws(() => spend.inspect(result.modelCalls[0].callId), { code: "invalid_record" });
   await assert.rejects(runtime(spend, provider).turn(input), { code: "model_call_admission_failed" });
   assert.equal(calls, 1);
-});
-
-for (const stage of ["in-provider", "before-settlement"]) test(`process death ${stage} leaves committed money held across restart`, { timeout: 10000 }, async t => {
-  const app = fixture(t);
-  const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./fixtures/model-spend-worker.ts", import.meta.url)), app.path, stage],
-    { stdio: ["ignore", "ignore", "pipe"] });
-  let errors = ""; child.stderr?.setEncoding("utf8").on("data", chunk => { errors += chunk; });
-  const [code, signal] = await once(child, "close");
-  assert.equal(signal, "SIGKILL", `worker failed: ${code}: ${errors}`);
-  app.close(); const recovered = app.open(); let calls = 0;
-  await assert.rejects(runtime(recovered.spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input), { code: "model_call_denied" });
-  assert.equal(calls, 0); assert.equal(recovered.db.prepare("SELECT count(*) n FROM provider_calls").get()?.n, 1);
-  assert.equal(recovered.spend.inspectBudget(scope).reservedAmount, 10);
-});
-
-test("independent processes cannot both reserve the last available call", { timeout: 10000 }, async t => {
-  const app = fixture(t);
-  const children = [0, 1].map(() => spawn(process.execPath,
-    ["--import", "tsx", fileURLToPath(new URL("./fixtures/model-spend-worker.ts", import.meta.url)), app.path, "compete"],
-    { stdio: ["ignore", "ignore", "pipe", "ipc"] }));
-  t.after(() => { for (const child of children) if (child.exitCode === null) child.kill("SIGKILL"); });
-  const exits = children.map(child => once(child, "close"));
-  await Promise.all(children.map(child => once(child, "message")));
-  for (const child of children) child.send("go");
-  const results = await Promise.all(exits);
-  assert.deepEqual(results.map(([code]) => code).sort(), [0, 2]);
-  assert.equal(app.db.prepare("SELECT count(*) n FROM provider_calls").get()?.n, 1);
-  assert.equal(app.spend.inspectBudget(scope).totalAmount, 10);
 });

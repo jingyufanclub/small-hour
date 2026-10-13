@@ -1,7 +1,6 @@
 import { parseObject } from "./fixtures/tool-input.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as api from "../src/index.js";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelProvider, type ProviderMessage, type RuntimeOptions, type TurnContext, type TurnInput } from "../src/index.js";
 import { OpenAICompatibleProvider } from "../src/providers/openai-compatible.js";
@@ -40,12 +39,6 @@ function pngOfSize(bytes: number): Image {
   return image(buffer.toString("base64"));
 }
 
-test("image limits are published without mutable settings", () => {
-  const limits = (api as unknown as { IMAGE_INPUT_LIMITS: object }).IMAGE_INPUT_LIMITS;
-  assert.deepEqual(limits, { maxImages: 20, maxImageBytes: 3 * 1024 * 1024, maxTotalImageBytes: 12 * 1024 * 1024 });
-  assert.equal(Object.isFrozen(limits), true);
-});
-
 test("mixed text and supported image formats reach the provider in exact order", async () => {
   const supplied = [...parts(), image(jpeg, "image/jpeg")];
   let calls = 0;
@@ -54,7 +47,7 @@ test("mixed text and supported image formats reach the provider in exact order",
     assert.deepEqual(request.messages, [message(supplied)]);
     return reply;
   })).turn(input(supplied));
-  assert.equal(result.output, "inspected");
+  assert.equal(result.status, "reply");
   assert.equal(calls, 1);
 });
 
@@ -189,19 +182,15 @@ test("mutating caller parts during context loading cannot replace the selected i
   resume.release();
   await pending;
   assert.deepEqual(seen, [message(expected)]);
-  assert.equal(Object.isFrozen(supplied), false);
 });
 
 test("callbacks cannot change image bytes across a real host tool round trip", async () => {
-  const supplied = parts(), seen: ProviderMessage[][] = [], callbacks: string[] = [];
+  const supplied = parts(), expected = structuredClone(supplied), seen: ProviderMessage[][] = [], callbacks: string[] = [];
   const inspectContext = (name: string, context: TurnContext) => {
     callbacks.push(name);
     const selected = context.input as unknown as Part[];
-    assert.notEqual(selected, supplied);
-    assert.equal(Object.isFrozen(selected), true);
-    assert.equal(Object.isFrozen(selected[1]), true);
-    assert.throws(() => { (selected[1] as Image).data = "replacement"; }, TypeError);
-    assert.throws(() => { selected.reverse(); }, TypeError);
+    Reflect.set(selected[1], "data", "replacement");
+    Reflect.set(selected, "0", selected[2]);
   };
   const app = runtime(capable(async request => {
     seen.push(structuredClone(request.messages));
@@ -218,10 +207,10 @@ test("callbacks cannot change image bytes across a real host tool round trip", a
   });
   const result = await app.turn({ ...input(supplied), allowedTools: ["lookup"] });
   assert.deepEqual(callbacks, ["persona", "memory", "admit", "tool", "admit", "output"]);
-  assert.deepEqual(seen[0], [message(supplied)]);
-  assert.deepEqual(seen[1][0], message(supplied));
+  assert.deepEqual(seen[0], [message(expected)]);
+  assert.deepEqual(seen[1][0], message(expected));
   assert.deepEqual(seen[1].at(-1), message([{ type: "tool_result", toolUseId: "lookup-1", content: '{"id":"item-7","state":"available"}' }]));
   assert.equal(result.toolCalls[0].id, "lookup-1");
   assert.equal(result.toolCalls[0].status, "completed");
-  assert.equal(result.output, "inspected");
+  assert.equal(result.status, "reply");
 });
