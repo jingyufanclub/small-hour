@@ -1,6 +1,6 @@
 {
   "name": "small-hour",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "private": true,
   "license": "Apache-2.0",
   "description": "A provider-neutral TypeScript runtime for application-defined LLM workflows, with tool execution, saved progress, spending controls, and recovery from failures.",

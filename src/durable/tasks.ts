@@ -174,6 +174,19 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       this.database.exec(`ALTER TABLE small_hour_tasks ADD COLUMN admission_pauses INTEGER NOT NULL DEFAULT 0
         CHECK (typeof(admission_pauses) = 'integer' AND admission_pauses BETWEEN 0 AND 9007199254740991)`);
     }
+    this.database.exec(`CREATE TRIGGER IF NOT EXISTS small_hour_tasks_contract_update
+      BEFORE UPDATE OF scope, id, kind, version, input_json, plan_json, schedule_json, concurrency_scope ON small_hour_tasks
+      WHEN NEW.scope IS NOT OLD.scope OR NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind OR NEW.version IS NOT OLD.version
+        OR NEW.input_json IS NOT OLD.input_json OR NEW.plan_json IS NOT OLD.plan_json
+        OR NEW.schedule_json IS NOT OLD.schedule_json OR NEW.concurrency_scope IS NOT OLD.concurrency_scope
+      BEGIN SELECT RAISE(ABORT, 'The task contract is immutable.'); END;
+    CREATE TRIGGER IF NOT EXISTS small_hour_tasks_contract_insert
+      BEFORE INSERT ON small_hour_tasks
+      WHEN EXISTS (SELECT 1 FROM small_hour_tasks previous WHERE previous.scope = NEW.scope AND previous.id = NEW.id
+        AND (NEW.kind IS NOT previous.kind OR NEW.version IS NOT previous.version
+          OR NEW.input_json IS NOT previous.input_json OR NEW.plan_json IS NOT previous.plan_json
+          OR NEW.schedule_json IS NOT previous.schedule_json OR NEW.concurrency_scope IS NOT previous.concurrency_scope))
+      BEGIN SELECT RAISE(ABORT, 'The task contract is immutable.'); END`);
   }
 
   enqueue(request: OperationRequest, timing: TaskSchedule): TaskState {
