@@ -1,5 +1,5 @@
 import { types } from "node:util";
-import { readModelCallStop } from "../model-call-record.js";
+import { readModelCallAdmission, readModelCallStop } from "../model-call-record.js";
 import type { ModelCallContext, ModelCallHooks, ModelCallRecord, TokenUsage } from "../types.js";
 import { canonicalJson } from "./json.js";
 import type { SqliteDatabase } from "./sqlite.js";
@@ -148,6 +148,7 @@ function decision(value: ModelSpendDecision): ModelSpendDecision {
 }
 
 function record(value: Readonly<ModelCallRecord>, context: CallIdentity): ModelCallRecord {
+  if (readModelCallAdmission(value)) throw new TypeError("An admission refusal cannot settle a reserved call.");
   if (value.callId !== context.callId || value.provider !== context.provider || value.attempt !== context.attempt || value.hop !== context.hop
     || !["not_started", "responded", "rejected", "unknown"].includes(value.status)
     || !["unrecorded", "recorded"].includes(value.accounting)) throw new TypeError("Model accounting must match its reserved call.");

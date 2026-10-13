@@ -1,5 +1,5 @@
 import type { StructuredTurnResult, TurnReport, TurnResult } from "../types.js";
-import { readModelCallStop } from "../model-call-record.js";
+import { readModelCallAdmission, readModelCallStop } from "../model-call-record.js";
 import { canonicalJson } from "./json.js";
 import { readTraceContext, readTraceSummary } from "../tracing.js";
 
@@ -42,6 +42,7 @@ export function readReport(value: unknown): TurnReport {
     requireValue(text(call.accounting) && ["unrecorded", "recorded"].includes(call.accounting));
     requireValue(call.requestId === undefined || typeof call.requestId === "string");
     if (call.usage !== undefined) usage(call.usage);
+    readModelCallAdmission(call);
     readModelCallStop(call);
   }
   list(row.usage).forEach(usage);
@@ -69,8 +70,11 @@ export function reportValue(report: TurnReport): TurnReport {
     ...(report.trace === undefined ? {} : { trace: report.trace }),
     ...(report.choice === undefined ? {} : { choice: report.choice }),
     toolCalls: report.toolCalls.map(({ errorCode, ...call }) => ({ ...call, ...(errorCode === undefined ? {} : { errorCode }) })),
-    modelCalls: report.modelCalls.map(({ requestId, usage, ...call }) => ({ ...call,
-      ...(requestId === undefined ? {} : { requestId }), ...(usage === undefined ? {} : { usage }) })),
+    modelCalls: report.modelCalls.map(record => {
+      if (record.admission === "denied") return record;
+      const { requestId, usage, ...call } = record;
+      return { ...call, ...(requestId === undefined ? {} : { requestId }), ...(usage === undefined ? {} : { usage }) };
+    }),
     usage: report.usage,
   };
 }

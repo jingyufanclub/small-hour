@@ -1,6 +1,6 @@
 # Storage reference
 
-Start with [why storage is useful](storage.md). This page maps the saved records to SQLite tables and explains their timestamps.
+See [why storage is useful](storage.md). This page maps records, tables, and timestamps.
 
 ## Relationships and authority
 
@@ -21,6 +21,8 @@ erDiagram
         TEXT id PK
         TEXT plan_json "fixed workflow steps"
         TEXT status "execution progress"
+        INTEGER attempts "all task claims"
+        INTEGER admission_pauses "claims paused at admission"
     }
     small_hour_operation_receipts {
         TEXT scope PK
@@ -30,7 +32,7 @@ erDiagram
     small_hour_model_steps {
         TEXT scope PK
         TEXT id PK
-        TEXT report_json "attempt progress"
+        TEXT report_json "calls, refusals and recovery evidence"
         TEXT result_json "completed result, if available"
     }
     small_hour_deliveries {
@@ -50,6 +52,8 @@ erDiagram
 ```
 
 Enable SQLite foreign-key checks. Budget memberships point to one call; they have no independent balance. Keep both tables together. `quote_json` stores the admission decision: a cost quote or explicit denial with scopes, reason, and evidence. Denials have zero exposure. Spending call IDs also appear in model reports.
+
+For [admission pauses](admission-pauses.md), `admission_pauses` counts claim credits backed by saved model refusals. Credits cannot release money or erase history.
 
 ## Lifecycle timestamps
 

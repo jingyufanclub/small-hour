@@ -6,7 +6,7 @@ Your app defines and submits tasks and decides when to call the runner. **Small 
 
 ## Define and submit
 
-Construct it with your synchronous SQLite connection, workflow definitions, and `{ leaseMs, now? }`. `initialize()` prepares task storage and stores needed by registered steps. Initialize spending separately.
+Construct it with a synchronous SQLite connection, workflows, and `{ leaseMs, now? }`. `initialize()` prepares their stores; initialize spending separately.
 
 A workflow has `kind`, `version`, ordered unique step IDs, and synchronous `authorize(context)`.
 
@@ -22,7 +22,7 @@ Context includes the task, step ID, preceding results, cancellation signal, and 
 
 ## Run work
 
-`run({ scope, id }, { signal? })` selects only that task. `runNext({ signal? })` selects the next eligible task. Both return inspected state with any transient `error`, or `undefined` when no selected work is eligible. Targeted execution never falls through to another task. Use `inspect(key)` for completed state and `retryModel` for uncertain model work.
+`run({ scope, id }, { signal? })` selects only that task. `runNext({ signal? })` selects the next eligible task. Both return inspected state with any transient `error`, or `undefined` when none is eligible. Targeting never falls through to another task. Use `inspect(key)` for saved state.
 
 ```mermaid
 flowchart LR
@@ -33,13 +33,15 @@ flowchart LR
     Claim -->|claimed| Steps[Authorize and execute steps]
     Claim -->|unavailable| Idle[Return undefined]
     Steps --> Saved[Save progress and return state]
+    Steps -->|Opted-in admission refusal| Pause[Pause]
+    Pause -->|Application retryModel| Claim
 ```
 
 Both enforce due times and skip unknown workflow versions; retain definitions for pending tasks. Selecting a key grants no permission.
 
 A **claim** gives temporary ownership until its **lease** expires after `leaseMs`. A **concurrency scope** prevents overlapping work; running or uncertain tasks hold it.
 
-Every claim consumes an attempt, including permission deferral and recovery. Permission returns `allow`, `rejected` with a reason, or `deferred` with a reason/due time.
+Claims consume attempts, including permission deferrals and recovery. [Opted-in admission pauses](admission-pauses.md) preserve the allowance and require explicit resumption. Permission returns `allow`, `rejected` with a reason, or `deferred` with a reason/due time.
 
 Completed steps reuse saved results. New steps recheck permission; rejected model output rejects the task. Deferral reserves no ordering.
 
@@ -48,7 +50,7 @@ Leases renew between steps; allow longer than the longest step. There is no hear
 ## Inspect, cancel, recover
 
 - `inspect(key)`: progress, reasons, attempts, timestamps, and step evidence, including local receipts.
-- `cancel(key, reason)`: stop queued/deferred work or request cancellation of running/uncertain work. Completed effects remain.
+- `cancel(key, reason)`: stop queued/deferred/paused work or request cancellation of running/uncertain work. Completed effects remain.
 - `retry(error, context)`: optional scheduling of rolled-back local work within its attempt limit.
 - `retryModel(...)`: explicit [recovery of eligible model work](model-recovery.md#through-the-task-runner); unfinished model work never repeats automatically.
 - `resolve(key, { status, reason, evidence })`: close verified uncertain work as failed/cancelled without replay or refund.

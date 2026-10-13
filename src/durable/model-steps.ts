@@ -10,7 +10,7 @@ import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOpti
 import { readReport, readResult, reportValue, resultJson, type SavedTurn } from "./model-step-record.js";
 import type { OperationRequest, SqliteDatabase } from "./sqlite.js";
 
-export interface ModelRecoveryContract { sideEffectFree: true; maxAttempts: number; maxModelCalls: number }
+export interface ModelRecoveryContract { sideEffectFree: true; maxAttempts: number; maxModelCalls: number; admissionDenials?: "pause" }
 export interface ModelStepRecoveryDecision { action: "retry"; checkpoint: string; reason: string; evidence: unknown }
 export type ModelStepAttempt = { attemptId: string; report: TurnReport } & (
   | { status: "started" | "completed"; recovery?: never; errorCode?: never }
@@ -66,11 +66,13 @@ function exact(value: Record<string, unknown>, keys: string[]): void {
 }
 export function readModelRecoveryContract(value: unknown): ModelRecoveryContract {
   const row = object(value);
-  exact(row, ["sideEffectFree", "maxAttempts", "maxModelCalls"]);
-  if (row.sideEffectFree !== true || ![row.maxAttempts, row.maxModelCalls].every(limit => Number.isSafeInteger(limit) && Number(limit) > 0)) {
+  exact(row, ["sideEffectFree", "maxAttempts", "maxModelCalls", "admissionDenials"]);
+  if (row.sideEffectFree !== true || ![row.maxAttempts, row.maxModelCalls].every(limit => Number.isSafeInteger(limit) && Number(limit) > 0)
+    || (row.admissionDenials !== undefined && row.admissionDenials !== "pause")) {
     throw new TypeError("Recovery requires side-effect-free execution and positive integer limits");
   }
-  return { sideEffectFree: true, maxAttempts: row.maxAttempts as number, maxModelCalls: row.maxModelCalls as number };
+  return { sideEffectFree: true, maxAttempts: row.maxAttempts as number, maxModelCalls: row.maxModelCalls as number,
+    ...(row.admissionDenials === "pause" ? { admissionDenials: "pause" } : {}) };
 }
 export function readModelStepRecoveryDecision(value: unknown): ModelStepRecoveryDecision {
   const row = object(value);
@@ -160,8 +162,22 @@ function validateResult(json: string, input: AnyInput, code: "invalid_result" | 
   }
 }
 
-function callCount(attempts: readonly { report: TurnReport }[]): number {
-  return attempts.reduce((count, attempt) => count + attempt.report.modelCalls.length, 0);
+function admissionOnly(attempt: Pick<ModelStepAttempt, "status" | "errorCode" | "report">): boolean {
+  return attempt.status === "failed" && attempt.errorCode === "model_call_denied" && attempt.report.modelCalls.length === 1
+    && attempt.report.modelCalls[0].admission === "denied" && attempt.report.toolCalls.length === 0;
+}
+export function isAdmissionPause(state: ModelStepState): boolean {
+  return state.recovery?.admissionDenials === "pause" && state.status === "failed" && admissionOnly(state);
+}
+export function admissionPauseCount(state: ModelStepState): number {
+  return state.recovery?.admissionDenials === "pause" ? state.attempts.filter(admissionOnly).length : 0;
+}
+function attemptCount(attempts: readonly ModelStepAttempt[], recovery: ModelRecoveryContract): number {
+  return attempts.filter(attempt => recovery.admissionDenials !== "pause" || !admissionOnly(attempt)).length;
+}
+function callCount(attempts: readonly { report: TurnReport }[], recovery: ModelRecoveryContract): number {
+  return attempts.reduce((count, attempt) => count + attempt.report.modelCalls.filter(call =>
+    recovery.admissionDenials !== "pause" || call.admission !== "denied").length, 0);
 }
 function recoveryReport(value: unknown, agentId: string, turnId: string): TurnReport {
   const report = readReport(value);
@@ -178,6 +194,7 @@ function preservedReport(previous: TurnReport, next: TurnReport): TurnReport {
     if (old.callId !== current.callId || old.provider !== current.provider || old.attempt !== current.attempt || old.hop !== current.hop) {
       throw new TypeError("Attempt progress changed a provider call identity");
     }
+    if (old.admission === "denied" && current.admission !== "denied") throw new TypeError("Attempt progress changed an admission refusal");
     if (old.status === "responded" && current.status !== "responded") merged.modelCalls[index] = old;
     else {
       if (old.usage && !current.usage) current.usage = old.usage;
@@ -260,7 +277,8 @@ export class SqliteModelStepStore {
       if (state.checkpoint !== approved.checkpoint) throw new ModelStepError("stale_checkpoint", "The inspected model step has changed.", { state });
       if (state.status === "completed") return { state, replayed: true };
       if (!state.recovery) throw new ModelStepError("recovery_not_allowed", "This model step did not opt into recovery before execution.", { state });
-      if (state.attempts.length >= state.recovery.maxAttempts || callCount(state.attempts) >= state.recovery.maxModelCalls) {
+      if (attemptCount(state.attempts, state.recovery) >= state.recovery.maxAttempts
+        || callCount(state.attempts, state.recovery) >= state.recovery.maxModelCalls) {
         throw new ModelStepError("recovery_limit", "The model step has exhausted its recovery allowance.", { state });
       }
       assertActive();
@@ -363,7 +381,8 @@ export class SqliteModelStepStore {
         WHERE scope = ? AND id = ? AND attempt_id = ? AND status = 'started'`)
         .run(status, encoded, result, errorCode, recordTime(this.now, state.updatedAt), status, encoded, result, errorCode, request.scope, request.id, attemptId);
       if (Number(changed.changes) !== 1) throw new ModelStepError("step_changed", "The model step is no longer the active attempt.");
-      return status === "started" && state.recovery && callCount([...saved.archived, { report: incoming }]) > state.recovery.maxModelCalls ? "limit" : "saved";
+      return status === "started" && state.recovery
+        && callCount([...saved.archived, { report: incoming }], state.recovery) > state.recovery.maxModelCalls ? "limit" : "saved";
     });
     if (outcome === "changed") throw new ModelStepError("step_changed", "The model step is no longer the active attempt.");
     if (outcome === "limit") throw new ModelStepError("recovery_limit", "The model step has exhausted its cumulative call allowance.");
@@ -398,7 +417,7 @@ export class SqliteModelStepStore {
         toolFree(turn as unknown as AnyInput);
         if (turn.turnId !== undefined && turn.turnId !== turnId) throw new TypeError("Changed logical turn identity");
         const envelope = object(storedReport); exact(envelope, ["report", "attempts"]);
-        if (!Array.isArray(envelope.attempts) || envelope.attempts.length >= recovery.maxAttempts) throw new TypeError("Invalid attempt history");
+        if (!Array.isArray(envelope.attempts)) throw new TypeError("Invalid attempt history");
         nonempty(turn.agentId);
         for (const value of envelope.attempts) {
           const attempt = object(value); exact(attempt, ["attemptId", "report", "status", "errorCode", "recovery"]);
@@ -408,6 +427,7 @@ export class SqliteModelStepStore {
           else if (attempt.status === "superseded" && attempt.errorCode === undefined) archived.push({ ...base, status: "superseded" });
           else throw new TypeError("Invalid archived attempt");
         }
+        if (attemptCount(archived, recovery) >= recovery.maxAttempts) throw new TypeError("Invalid attempt history");
         report = recoveryReport(envelope.report, turn.agentId, turnId);
       } else {
         report = readReport(storedReport);

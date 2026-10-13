@@ -145,8 +145,9 @@ interface ModelCallIdentity {
 }
 
 export type ModelCallRecord = ModelCallIdentity & (
-  | { status: "responded"; stop?: ProviderStop }
-  | { status: "not_started" | "rejected" | "unknown"; stop?: never }
+  | { status: "responded"; stop?: ProviderStop; admission?: never }
+  | { status: "not_started" | "rejected" | "unknown"; stop?: never; admission?: never }
+  | { status: "not_started"; admission: "denied"; accounting: "unrecorded"; requestId?: never; usage?: never; stop?: never }
 );
 
 export interface ModelCallHooks {

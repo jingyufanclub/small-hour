@@ -11,7 +11,7 @@ Your app supplies instructions, context, and tools—functions the model can req
 Requires Node.js 26.10+ and ESM imports.
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.12.0/small-hour-0.12.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.13.0/small-hour-0.13.0.tgz
 ```
 
 Set `OPENAI_API_KEY` and `OPENAI_MODEL` in your server environment. Save this as `quickstart.mts` and run `node quickstart.mts`. This makes a billable request.
