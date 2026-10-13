@@ -2,7 +2,7 @@
 
 Run `npm run check` for type checking, deterministic tests, and a build. The tests use fixture providers, local HTTP servers, and disposable SQLite databases. They make no paid model calls. Some recovery tests start a separate process and interrupt it to check what survives.
 
-`npm run check:package` also installs the package built from the current checkout in a separate JavaScript and TypeScript consumer. CI runs both commands. See [package verification](https://github.com/jingyufanclub/small-hour/blob/main/scripts/README.md) for artifact options.
+`npm run check:package` also installs the package built from the current checkout in a separate JavaScript and TypeScript consumer. CI runs both commands for pull requests and pushes to `main`; tag pushes do not trigger CI. New PR runs cancel older runs for the same PR. See [package verification](https://github.com/jingyufanclub/small-hour/blob/main/scripts/README.md) for artifact options.
 
 ## What the tests protect
 
