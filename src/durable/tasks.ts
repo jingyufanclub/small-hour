@@ -76,6 +76,7 @@ type Plan = ({ id: string; kind: "local" } | { id: string; kind: "model"; recove
 type StoredTask = Omit<TaskState, "steps"> & { plan: Plan; token: string | null; scheduleJson: string };
 type Key = Pick<OperationRequest, "scope" | "id">;
 type ModelRecovery = ModelStepRecoveryDecision & { stepId: string };
+type ClaimSelection = { key?: Key; recovery?: never } | { key: Key; recovery: ModelRecovery | "delivery" };
 
 function nonempty(value: unknown): asserts value is string {
   if (typeof value !== "string" || !value.trim()) throw new TypeError("Expected a nonempty string");
@@ -273,6 +274,14 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     return this.executeClaimed(claimed, options);
   }
 
+  async run(key: Key, options: { signal?: AbortSignal } = {}): Promise<TaskRunResult | undefined> {
+    if (options.signal?.aborted) return undefined;
+    nonempty(key.scope); nonempty(key.id);
+    const claimed = this.claim({ key });
+    if (!claimed) return undefined;
+    return this.executeClaimed(claimed, options);
+  }
+
   private async executeClaimed(claimed: StoredTask, options: { signal?: AbortSignal }, recovery?: ModelRecovery): Promise<TaskRunResult | undefined> {
     if (claimed.status !== "running") return this.inspect(claimed);
     if (!recovery && this.inspect(claimed)!.steps.some(step => step.kind === "model" && step.status === "unresolved")) {
@@ -375,7 +384,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     const task = this.required(key);
     if (task.status !== "uncertain") throw new TaskError("task_changed", "Only uncertain tasks accept model recovery.");
     if (task.cancellationReason) return this.inspect(task);
-    const claimed = this.claim(key, recovery);
+    const claimed = this.claim({ key, recovery });
     return claimed ? this.executeClaimed(claimed, options, recovery) : undefined;
   }
 
@@ -386,7 +395,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     if (task.status !== "uncertain") return this.inspect(task);
     const state = this.deliveries.inspect(task);
     if (state.status === "uncertain" && (conflictingDeliveryReceipts(state.attempts) || (step.sink.idempotency === "none" && !step.sink.reconcile))) return this.inspect(task);
-    const claimed = this.claim(key);
+    const claimed = this.claim({ key, recovery: "delivery" });
     return claimed ? this.executeClaimed(claimed, options) : undefined;
   }
 
@@ -444,18 +453,22 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     }
   }
 
-  private claim(key?: Key, recovery?: ModelRecovery): StoredTask | undefined {
+  private claim(selection: ClaimSelection = {}): StoredTask | undefined {
     if (!this.workflows.length) return undefined;
+    const { key } = selection;
+    const recovery = selection.recovery === "delivery" ? undefined : selection.recovery;
     return this.transaction(() => {
       const now = this.time();
       const supported = this.workflows.map(() => "(t.kind = ? AND t.version = ?)").join(" OR ");
       const candidate = this.database.prepare(`SELECT t.scope, t.id FROM small_hour_tasks t
-        WHERE (${supported}) AND ${key ? "t.scope = ? AND t.id = ? AND t.status = 'uncertain'"
+        WHERE (${supported}) ${key ? "AND t.scope = ? AND t.id = ?" : ""}
+        AND ${selection.recovery ? "t.status = 'uncertain'"
           : "((t.status IN ('queued', 'deferred') AND t.due_at <= ?) OR (t.status = 'running' AND t.lease_until <= ?))"}
         AND NOT EXISTS (SELECT 1 FROM small_hour_tasks other WHERE other.concurrency_scope = t.concurrency_scope
           AND (other.scope != t.scope OR other.id != t.id) AND other.status IN ('running', 'uncertain'))
         ORDER BY t.due_at, t.scope, t.id LIMIT 1`)
-        .get(...this.workflows.flatMap(workflow => [workflow.kind, workflow.version]), ...(key ? [key.scope, key.id] : [now, now])) as Key | undefined;
+        .get(...this.workflows.flatMap(workflow => [workflow.kind, workflow.version]),
+          ...(key ? [key.scope, key.id] : []), ...(selection.recovery ? [] : [now, now])) as Key | undefined;
       if (!candidate) {
         if (key && recovery && this.required(key).status !== "uncertain") throw new TaskError("task_changed", "The task is no longer available for model recovery.");
         return undefined;

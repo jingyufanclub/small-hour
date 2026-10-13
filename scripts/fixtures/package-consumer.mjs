@@ -4,7 +4,7 @@ import { EmptyMemorySource, IMAGE_INPUT_LIMITS, ModelSafeToolError, SmallHourRun
 import { AnthropicProvider } from "small-hour/providers/anthropic";
 import { OpenAIProvider } from "small-hour/providers/openai";
 import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible";
-import { SqliteModelStepStore, SqliteModelSpendStore } from "small-hour/durable/sqlite";
+import { SqliteModelStepStore, SqliteModelSpendStore, SqliteTaskRunner } from "small-hour/durable/sqlite";
 
 globalThis.fetch = async () => assert.fail("The package consumer must not make network requests");
 assert.match(import.meta.resolve("small-hour"), /\/node_modules\/small-hour\/dist\/index\.js$/);
@@ -146,5 +146,20 @@ if (!process.argv.includes("--core-only")) {
     assert.equal(savedDenial.status, "denied"); assert.equal(savedDenial.chargedAmount, 0);
     for (const { scope } of scopes) assert.equal(spending.inspectBudget(scope).totalAmount, 3);
     assert.equal(paidCalls, 1);
+    db.exec("CREATE TABLE task_effects (id TEXT PRIMARY KEY)");
+    const runner = new SqliteTaskRunner(db, [{ kind: "save", version: "1", authorize: () => ({ status: "allow" }), steps: [
+      { id: "save", kind: "local", parseResult: value => value, execute(connection, context) {
+        connection.prepare("INSERT INTO task_effects VALUES (?)").run(context.task.id); return context.task.input;
+      } },
+    ] }], { leaseMs: 1000, now: () => 100 });
+    runner.initialize();
+    const first = { scope: "consumer", id: "first", kind: "save", version: "1", input: { id: "item-7" } };
+    const selected = { ...first, id: "selected" };
+    const timing = { concurrencyScope: "consumer", dueAt: 100, maxAttempts: 2 };
+    const queued = runner.enqueue(first, timing); runner.enqueue(selected, timing);
+    assert.equal((await runner.run(selected)).status, "completed");
+    assert.deepEqual(runner.inspect(first), queued);
+    assert.equal(await runner.run(selected), undefined);
+    assert.deepEqual(db.prepare("SELECT id FROM task_effects").all().map(row => row.id), ["selected"]);
   } finally { db.close(); }
 }

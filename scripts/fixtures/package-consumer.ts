@@ -68,5 +68,7 @@ export async function verifyPublicTypes(database: SqliteDatabase, state: ModelSt
     { id: "select", kind: "model", recovery, prepare: () => ({ runtime, input }) },
   ] };
   const runner = new SqliteTaskRunner(database, [workflow], { leaseMs: 1000 });
-  return { selectedId, stop, runner, trace, timestamps };
+  const selected = await runner.run({ scope: request.scope, id: request.id }, { signal: new AbortController().signal });
+  const selectedIdOrAbsent: string | undefined = selected?.id;
+  return { selectedId, selectedIdOrAbsent, stop, runner, trace, timestamps };
 }
