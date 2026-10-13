@@ -47,7 +47,15 @@ export async function completeModelCall(
             deadline.check();
             throw new RuntimeError("model admission failed", "model_call_admission_failed", { cause: error });
           }
-          if (admitted !== true) throw new RuntimeError("host denied model call", "model_call_denied");
+          if (admitted !== true) {
+            if (admitted === false) {
+              call = { callId: call.callId, provider: call.provider, attempt: call.attempt, hop: call.hop,
+                ...(call.trace ? { trace: call.trace } : {}), status: "not_started", admission: "denied", accounting: "unrecorded" };
+              report.modelCalls[callIndex] = call;
+              await options.checkpoint?.();
+            }
+            throw new RuntimeError("host denied model call", "model_call_denied");
+          }
         }
 
         const record = async () => {

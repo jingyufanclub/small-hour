@@ -161,5 +161,27 @@ if (!process.argv.includes("--core-only")) {
     assert.deepEqual(runner.inspect(first), queued);
     assert.equal(await runner.run(selected), undefined);
     assert.deepEqual(db.prepare("SELECT id FROM task_effects").all().map(row => row.id), ["selected"]);
+    let admitted = false, dispatched = 0;
+    const budgeted = new SmallHourRuntime({ persona: new StaticPersonaSource("Use the supplied ID."), memory: new EmptyMemorySource(),
+      modelCalls: { admit: () => admitted }, provider: { name: "fixture", async complete() { dispatched++; return answer("item-7"); } } });
+    const pausedRunner = new SqliteTaskRunner(db, [{ kind: "budgeted", version: "1", authorize: () => ({ status: "allow" }), steps: [
+      { id: "compose", kind: "model", recovery: { sideEffectFree: true, maxAttempts: 1, maxModelCalls: 1, admissionDenials: "pause" },
+        prepare: () => ({ runtime: budgeted, input }) },
+    ] }], { leaseMs: 1000, now: () => 100 });
+    pausedRunner.initialize();
+    const budgetedTask = { ...first, id: "budgeted", kind: "budgeted" };
+    pausedRunner.enqueue(budgetedTask, { ...timing, maxAttempts: 1 });
+    let waiting = await pausedRunner.run(budgetedTask);
+    const resume = () => pausedRunner.retryModel(budgetedTask, { stepId: "compose", action: "retry",
+      checkpoint: waiting.steps[0].model.checkpoint, reason: "Application permits another admission check", evidence: { policy: 1 } });
+    for (let index = 0; index < 3; index++) {
+      assert.equal(waiting.status, "paused"); assert.equal(waiting.attempts, waiting.admissionPauses);
+      assert.equal(waiting.steps[0].model.report.modelCalls[0].admission, "denied");
+      waiting = await resume();
+    }
+    assert.equal(dispatched, 0); admitted = true;
+    const resumed = await resume();
+    assert.equal(resumed.status, "completed"); assert.equal(dispatched, 1);
+    assert.equal(resumed.steps[0].result.output, "item-7");
   } finally { db.close(); }
 }

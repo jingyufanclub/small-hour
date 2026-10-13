@@ -5,6 +5,15 @@ const reasons: Record<ProviderStopReason, true> = {
   content_filter: true, context_limit: true, pause: true, unknown: true,
 };
 
+export function readModelCallAdmission(call: {
+  admission?: unknown; status?: unknown; accounting?: unknown; requestId?: unknown; usage?: unknown;
+}): "denied" | undefined {
+  if (call.admission === undefined) return undefined;
+  if (call.admission !== "denied" || call.status !== "not_started" || call.accounting !== "unrecorded"
+    || call.requestId !== undefined || call.usage !== undefined) throw new TypeError("Invalid model admission refusal.");
+  return "denied";
+}
+
 export function readModelCallStop(call: { status?: unknown; stop?: unknown }): ProviderStop | undefined {
   if (call.stop === undefined) return undefined;
   if (call.status !== "responded" || !call.stop || typeof call.stop !== "object" || Array.isArray(call.stop)) {

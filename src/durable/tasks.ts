@@ -4,12 +4,12 @@ import type { SmallHourRuntime } from "../runtime.js";
 import type { StructuredTurnInput, TurnInput } from "../types.js";
 import { canonicalJson } from "./json.js";
 import { DeliveryLedger, acceptedDelivery, conflictingDeliveryReceipts, deliveryKey, type DeliverySink, type DeliveryState, type DeliveryOutcome } from "./delivery.js";
-import { SqliteModelStepStore, readModelRecoveryContract, readModelStepRecoveryDecision,
+import { SqliteModelStepStore, admissionPauseCount, isAdmissionPause, readModelRecoveryContract, readModelStepRecoveryDecision,
   type ModelRecoveryContract, type ModelStepRecoveryDecision, type ModelStepState } from "./model-steps.js";
 import { SqliteOperationStore, type OperationReceipt, type OperationRequest, type SqliteDatabase } from "./sqlite.js";
 import { initializeTimestamps, readTimestamps, recordTime, type RecordTimestamps } from "./lifecycle.js";
 
-export type TaskStatus = "queued" | "running" | "deferred" | "completed" | "cancelled" | "rejected" | "failed" | "uncertain";
+export type TaskStatus = "queued" | "running" | "deferred" | "paused" | "completed" | "cancelled" | "rejected" | "failed" | "uncertain";
 export interface TaskSchedule { concurrencyScope: string; dueAt: number; maxAttempts: number }
 export type TaskPermission = { status: "allow" } | { status: "rejected"; reason: string }
   | { status: "deferred"; reason: string; dueAt: number };
@@ -56,6 +56,7 @@ export type TaskStepState = {
 export interface TaskState extends OperationRequest, TaskSchedule, RecordTimestamps {
   status: TaskStatus;
   attempts: number;
+  admissionPauses: number;
   reason: string | null;
   cancellationReason: string | null;
   leaseUntil: number | null;
@@ -169,6 +170,10 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     CREATE INDEX IF NOT EXISTS small_hour_tasks_due ON small_hour_tasks (kind, version, status, due_at);
     CREATE INDEX IF NOT EXISTS small_hour_tasks_scope ON small_hour_tasks (concurrency_scope, status)`);
     initializeTimestamps(this.database, "small_hour_tasks", [[1, 2]]);
+    if (!this.database.prepare("SELECT name FROM pragma_table_info('small_hour_tasks') WHERE name = 'admission_pauses'").get()) {
+      this.database.exec(`ALTER TABLE small_hour_tasks ADD COLUMN admission_pauses INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(admission_pauses) = 'integer' AND admission_pauses BETWEEN 0 AND 9007199254740991)`);
+    }
   }
 
   enqueue(request: OperationRequest, timing: TaskSchedule): TaskState {
@@ -236,6 +241,14 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       if (step.status !== "completed" || (step.model?.status === "completed" && step.model.result.status === "rejected")) unfinished = true;
     }
     if (state.status === "completed" && unfinished) throw new TaskError("invalid_task", "Completed tasks require every step to have an accepted result.");
+    const pauses = steps.reduce((count, step) => count + (step.model ? admissionPauseCount(step.model) : 0), 0);
+    if (state.admissionPauses > pauses) throw new TaskError("invalid_task", "Task admission credits require model refusal evidence.");
+    if (state.status === "paused") {
+      const step = steps.find(step => step.status !== "completed");
+      if (!step?.model || !isAdmissionPause(step.model) || state.reason !== "model_admission_denied") {
+        throw new TaskError("invalid_task", "A paused task requires a refused model admission.");
+      }
+    }
     return { ...state, steps };
   }
 
@@ -243,7 +256,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     nonempty(reason);
     this.transaction(() => {
       const task = this.required(key);
-      if (!["queued", "deferred", "running", "uncertain"].includes(task.status)) return;
+      if (!["queued", "deferred", "paused", "running", "uncertain"].includes(task.status)) return;
       if (task.cancellationReason !== null) return;
       this.changed(this.database.prepare(`UPDATE small_hour_tasks SET cancellation_reason = ?,
         status = CASE WHEN status IN ('running', 'uncertain') THEN status ELSE 'cancelled' END,
@@ -313,6 +326,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       stepId = step.id;
       const request = operation(claimed, step);
       let localAttempt = false;
+      const previousModel = step.kind === "model" ? this.models.inspect(request) : undefined;
       try {
         this.active(claimed);
         let result: unknown;
@@ -328,7 +342,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
           });
           localAttempt = false;
         } else {
-          const existing = this.models.inspect(request);
+          const existing = previousModel;
           const recovering = recovery?.stepId === step.id;
           if (!existing || recovering) assertActive();
           const prepared = sync(step.prepare(context()));
@@ -356,18 +370,21 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         this.fenced(claimed);
         if (error instanceof TaskStopped) stopped = error;
         const model = step.kind === "model" ? this.models.inspect(request) : undefined;
+        if (model && model.attemptId !== previousModel?.attemptId && isAdmissionPause(model)) {
+          return { ...this.pauseAdmission(claimed, request, model.checkpoint), error };
+        }
         const unknown = model && (model.status === "started" || model.report.modelCalls.some(call => call.status === "unknown")
           || model.report.toolCalls.some(call => call.status === "unknown"));
         if (unknown || (model && model.status !== "completed" && (!stopped || stopped.outcome.status === "deferred"))) {
           return { ...this.finish(claimed, "uncertain", "model_step_unresolved"), error };
         }
         if (stopped) return this.finish(claimed, stopped.outcome.status, stopped.outcome.reason, stopped.outcome.dueAt);
-        if (localAttempt && workflow.retry && claimed.attempts < claimed.maxAttempts) {
+        if (localAttempt && workflow.retry && claimed.attempts - claimed.admissionPauses < claimed.maxAttempts) {
           const retry = sync(workflow.retry(error, context()));
           if (retry) { integer(retry.dueAt); nonempty(retry.reason); return { ...this.finish(claimed, "deferred", retry.reason, retry.dueAt), error }; }
         }
         if (!localAttempt) throw error;
-        return { ...this.finish(claimed, "failed", claimed.attempts >= claimed.maxAttempts ? "attempt_limit" : "step_failed"), error };
+        return { ...this.finish(claimed, "failed", claimed.attempts - claimed.admissionPauses >= claimed.maxAttempts ? "attempt_limit" : "step_failed"), error };
       }
     }
     return this.finish(claimed, "completed", null);
@@ -382,7 +399,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       recovery = { stepId, ...readModelStepRecoveryDecision(record) };
     } catch (cause) { throw new TaskError("invalid_request", "Model recovery requires a step, inspected checkpoint and application decision.", { cause }); }
     const task = this.required(key);
-    if (task.status !== "uncertain") throw new TaskError("task_changed", "Only uncertain tasks accept model recovery.");
+    if (task.status !== "uncertain" && task.status !== "paused") throw new TaskError("task_changed", "Only unfinished model tasks accept recovery.");
     if (task.cancellationReason) return this.inspect(task);
     const claimed = this.claim({ key, recovery });
     return claimed ? this.executeClaimed(claimed, options, recovery) : undefined;
@@ -462,7 +479,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       const supported = this.workflows.map(() => "(t.kind = ? AND t.version = ?)").join(" OR ");
       const candidate = this.database.prepare(`SELECT t.scope, t.id FROM small_hour_tasks t
         WHERE (${supported}) ${key ? "AND t.scope = ? AND t.id = ?" : ""}
-        AND ${selection.recovery ? "t.status = 'uncertain'"
+        AND ${selection.recovery ? (recovery ? "t.status IN ('uncertain', 'paused')" : "t.status = 'uncertain'")
           : "((t.status IN ('queued', 'deferred') AND t.due_at <= ?) OR (t.status = 'running' AND t.lease_until <= ?))"}
         AND NOT EXISTS (SELECT 1 FROM small_hour_tasks other WHERE other.concurrency_scope = t.concurrency_scope
           AND (other.scope != t.scope OR other.id != t.id) AND other.status IN ('running', 'uncertain'))
@@ -470,7 +487,9 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         .get(...this.workflows.flatMap(workflow => [workflow.kind, workflow.version]),
           ...(key ? [key.scope, key.id] : []), ...(selection.recovery ? [] : [now, now])) as Key | undefined;
       if (!candidate) {
-        if (key && recovery && this.required(key).status !== "uncertain") throw new TaskError("task_changed", "The task is no longer available for model recovery.");
+        if (key && recovery && !["uncertain", "paused"].includes(this.required(key).status)) {
+          throw new TaskError("task_changed", "The task is no longer available for model recovery.");
+        }
         return undefined;
       }
       const task = this.required(candidate);
@@ -485,10 +504,10 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         if (!step.model.recovery) throw new TaskError("invalid_request", "This model step did not opt in to recovery.");
         if (step.model.checkpoint !== recovery.checkpoint) throw new TaskError("task_changed", "Model recovery requires the current inspected checkpoint.");
       }
-      if (task.attempts >= task.maxAttempts) {
+      if (task.attempts - task.admissionPauses >= task.maxAttempts) {
         const delivery = task.plan[0].kind === "delivery" ? this.deliveries.inspect(task) : undefined;
         const delivered = delivery && acceptedDelivery(delivery);
-        const uncertain = delivery ? delivery.status === "uncertain" : ["running", "uncertain"].includes(task.status);
+        const uncertain = delivery ? delivery.status === "uncertain" : ["running", "uncertain", "paused"].includes(task.status);
         const status = delivered ? (task.cancellationReason ? "cancelled" : "completed") : uncertain ? "uncertain" : "failed";
         const reason = delivered ? task.cancellationReason : "attempt_limit";
         if (task.status !== status || task.reason !== reason || task.token !== null || task.leaseUntil !== null) {
@@ -523,6 +542,19 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       this.changed(this.database.prepare("UPDATE small_hour_tasks SET lease_until = ?, updated_at = ? WHERE scope = ? AND id = ? AND token = ?")
         .run(expires, recordTime(this.now, current.updatedAt), task.scope, task.id, task.token));
     });
+  }
+  private pauseAdmission(task: StoredTask, request: OperationRequest, checkpoint: string): TaskState {
+    this.transaction(() => {
+      const current = this.fenced(task), model = this.models.inspect(request);
+      if (!model || model.checkpoint !== checkpoint || !isAdmissionPause(model)) {
+        throw new TaskError("task_changed", "The refused admission changed before the task could pause.");
+      }
+      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, admission_pauses = admission_pauses + 1,
+        token = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ? AND token = ?`)
+        .run(current.cancellationReason ? "cancelled" : "paused", current.cancellationReason ?? "model_admission_denied",
+          recordTime(this.now, current.updatedAt), task.scope, task.id, task.token));
+    });
+    return this.inspect(task)!;
   }
   private finish(task: StoredTask, status: Exclude<TaskStatus, "queued" | "running">, reason: string | null, dueAt = task.dueAt): TaskState {
     this.transaction(() => {
@@ -559,20 +591,24 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       const steps = plan(JSON.parse(row.plan_json as string));
       if (canonicalJson(steps) !== row.plan_json || canonicalJson(timing) !== row.schedule_json || canonicalJson(request.input) !== row.input_json
         || row.concurrency_scope !== timing.concurrencyScope) throw new TypeError("Inconsistent task contract");
-      integer(row.attempts); integer(row.due_at);
-      if ((row.attempts as number) > timing.maxAttempts) throw new TypeError("Invalid attempts");
+      integer(row.attempts); integer(row.due_at); integer(row.admission_pauses);
+      if (row.admission_pauses > row.attempts || row.attempts - row.admission_pauses > timing.maxAttempts
+        || (row.admission_pauses > 0 && !steps.some(step => step.kind === "model" && step.recovery?.admissionDenials === "pause"))) {
+        throw new TypeError("Invalid attempts");
+      }
       const status = row.status as TaskStatus;
-      if (!["queued", "running", "deferred", "completed", "cancelled", "rejected", "failed", "uncertain"].includes(status)) throw new TypeError("Invalid status");
+      if (!["queued", "running", "deferred", "paused", "completed", "cancelled", "rejected", "failed", "uncertain"].includes(status)) throw new TypeError("Invalid status");
       if (status === "queued" ? row.attempts !== 0 : status !== "cancelled" && row.attempts === 0) throw new TypeError("Status and attempts disagree");
       if (status === "running") { nonempty(row.token); integer(row.lease_until); }
       else if (row.token !== null || row.lease_until !== null) throw new TypeError("Unexpected claim");
-      if (["deferred", "cancelled", "rejected", "failed", "uncertain"].includes(status)) nonempty(row.reason);
+      if (["deferred", "paused", "cancelled", "rejected", "failed", "uncertain"].includes(status)) nonempty(row.reason);
       else if (row.reason !== null) throw new TypeError("Unexpected reason");
       if (row.cancellation_reason !== null) nonempty(row.cancellation_reason);
       const resolution = row.resolution_json === null ? null : JSON.parse(row.resolution_json as string) as TaskResolution;
       if (row.resolution_json !== null && (!resolution || !["failed", "cancelled"].includes(resolution.status) || resolution.status !== status
         || resolution.reason !== row.reason || resolution.evidence == null || canonicalJson(resolution) !== row.resolution_json)) throw new TypeError("Invalid resolution");
-      return { ...request, ...timing, ...readTimestamps(row), dueAt: row.due_at as number, plan: steps, status, attempts: row.attempts as number,
+      return { ...request, ...timing, ...readTimestamps(row), dueAt: row.due_at as number, plan: steps, status, attempts: row.attempts,
+        admissionPauses: row.admission_pauses,
         reason: row.reason as string | null, cancellationReason: row.cancellation_reason as string | null,
         token: row.token as string | null, leaseUntil: row.lease_until as number | null, resolution, scheduleJson: row.schedule_json as string };
     } catch (cause) { throw new TaskError("invalid_task", "The saved task failed validation.", { cause }); }

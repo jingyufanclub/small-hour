@@ -30,7 +30,7 @@ const image: ImageBlock = { type: "image", mediaType: "image/png", data: "iVBORw
 const imageInput: InputContent = [{ type: "text", text: "Inspect." }, image];
 export const imageLimits = IMAGE_INPUT_LIMITS;
 export const verifyImageTypes = () => runtime.turn({ agentId: "consumer", input: imageInput });
-const recovery: ModelRecoveryContract = { sideEffectFree: true, maxAttempts: 2, maxModelCalls: 2 };
+const recovery: ModelRecoveryContract = { sideEffectFree: true, maxAttempts: 2, maxModelCalls: 2, admissionDenials: "pause" };
 const options: ModelStepOptions = { recovery };
 const request = { scope: "consumer", id: "select-1", kind: "selection", version: "1", input: { id: "item-7" } };
 
@@ -70,5 +70,7 @@ export async function verifyPublicTypes(database: SqliteDatabase, state: ModelSt
   const runner = new SqliteTaskRunner(database, [workflow], { leaseMs: 1000 });
   const selected = await runner.run({ scope: request.scope, id: request.id }, { signal: new AbortController().signal });
   const selectedIdOrAbsent: string | undefined = selected?.id;
-  return { selectedId, selectedIdOrAbsent, stop, runner, trace, timestamps };
+  const admissionPauses: number | undefined = selected?.admissionPauses;
+  const paused = selected?.status === "paused";
+  return { selectedId, selectedIdOrAbsent, stop, runner, trace, timestamps, admissionPauses, paused };
 }

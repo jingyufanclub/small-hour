@@ -37,7 +37,7 @@ The store verifies the unchanged contract, archives the old attempt with your de
 
 ## Limits survive restart
 
-`maxAttempts` includes the first attempt. `maxModelCalls` covers all attempts and transport retries. Every call record counts conservatively, including `not_started`; creating a new runtime cannot reset the allowance.
+`maxAttempts` includes the first attempt. `maxModelCalls` covers all attempts and transport retries. By default every call record counts, including `not_started`; a new runtime cannot reset the allowance. Opt into [admission pauses](admission-pauses.md) to preserve retries through proven refusals without dispatch.
 
 Late workers can add facts to their archived attempt, then receive `step_changed`. They cannot replace the current result. A crash during recovery requires fresh inspection and authorization. No recovery worker starts automatically.
 
@@ -53,4 +53,4 @@ await runner.retryModel(key, {
 }, { signal });
 ```
 
-Select the first unfinished model step and its inspected checkpoint. Recovery consumes a task claim and model attempt, rechecks permission/cancellation, and preserves earlier local receipts. Changing the recovery contract requires a new workflow version; keep old handlers for queued work.
+Select the first unfinished model step and its checkpoint. Recovery rechecks permission/cancellation and preserves earlier receipts. Claims and model attempts count unless the saved contract permits admission pauses. Changing that contract requires a new workflow version; keep old handlers for queued work.

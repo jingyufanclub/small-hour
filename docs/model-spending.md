@@ -1,6 +1,6 @@
 # Set a money budget
 
-A token limit controls one response's size. A money budget controls spending across requests. The optional `SqliteModelSpendStore` checks each model attempt against your allowances before allowing it to start.
+A token limit controls response size. A money budget controls spending across requests. `SqliteModelSpendStore` checks each attempt against your allowances before dispatch.
 
 **Your app supplies prices and conservative cost estimates.** Small Hour has no built-in price list or estimator.
 
@@ -48,6 +48,8 @@ flowchart LR
 ```
 
 A denial raises `model_call_denied`. Storage failure also prevents dispatch. Earlier charges remain; reservations never expire automatically. Every provider retry needs its own reservation. When pricing is unavailable, return an [explicit policy denial](spending-records.md#deny-before-pricing) to save the reason without fabricating a quote.
+
+Recoverable tasks can opt into [admission pauses](admission-pauses.md) so budget refusals preserve their retry allowance.
 
 ## Your pricing functions
 
