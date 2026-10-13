@@ -53,8 +53,157 @@ function save(id = "save") {
   } };
 }
 
-test("ordered saved results survive restart and feed one local effect without another model call", async t => {
+test("a selected task uses its complete scoped key without executing earlier work", async t => {
+  const f = fixture(t), authorized: string[] = [];
+  const selected = { ...task, id: "job-2" };
+  const app = f.open([workflow([{ ...save(), execute(db, context) {
+    assert.deepEqual(context.task, selected);
+    db.prepare("INSERT INTO effects (body) VALUES (?)").run(JSON.stringify(context.task));
+    return context.task.input;
+  } }], { authorize: context => {
+    authorized.push(`${context.task.scope}/${context.task.id}`); return { status: "allow" };
+  } })]);
+  const earlier = app.runner.enqueue(task, { ...schedule, dueAt: 80 });
+  const otherScope = app.runner.enqueue({ ...selected, scope: "account:b" }, { ...schedule, concurrencyScope: "account:b", dueAt: 90 });
+  app.runner.enqueue(selected, schedule);
+  const result = await app.runner.run(selected);
+  assert.equal(result?.status, "completed"); assert.equal(result?.id, selected.id);
+  assert.deepEqual(result?.steps[0].result, selected.input);
+  assert.deepEqual([...new Set(authorized)], ["account:a/job-2"]);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 1);
+  assert.deepEqual(app.runner.inspect(task), earlier);
+  assert.deepEqual(app.runner.inspect(otherScope), otherScope);
+  assert.equal(await app.runner.run(selected), undefined);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 1);
+});
+
+test("missing, future, cancelled and unsupported selected tasks never fall through", async t => {
+  const f = fixture(t), definition = workflow([save()]);
+  const app = f.open([definition]), newer = f.open([{ ...definition, version: "2" }]);
+  const ready = app.runner.enqueue(task, schedule);
+  const future = app.runner.enqueue({ ...task, id: "future" }, { ...schedule, dueAt: 101 });
+  const cancelled = { ...task, id: "cancelled" };
+  app.runner.enqueue(cancelled, schedule); app.runner.cancel(cancelled, "owner_cancelled");
+  const unsupported = newer.runner.enqueue({ ...task, id: "newer", version: "2" }, schedule);
+  for (const key of [{ ...task, id: "missing" }, future, cancelled, unsupported]) {
+    assert.equal(await app.runner.run(key), undefined);
+  }
+  assert.deepEqual(app.runner.inspect(task), ready);
+  assert.deepEqual(app.runner.inspect(future), future);
+  assert.deepEqual(newer.runner.inspect(unsupported), unsupported);
+  assert.equal(app.runner.inspect(cancelled)?.attempts, 0);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 0);
+  f.advance(101);
+  assert.equal((await app.runner.run(future))?.id, future.id);
+  assert.deepEqual(app.runner.inspect(task), ready);
+});
+
+test("invalid target keys and an aborted entry cannot claim available work", async t => {
+  const app = fixture(t).open([workflow([save()])]);
+  const ready = app.runner.enqueue(task, schedule);
+  for (const key of [undefined, null, {}, { scope: "", id: task.id }, { scope: task.scope, id: " " }]) {
+    await assert.rejects(app.runner.run(key as Parameters<typeof app.runner.run>[0]));
+  }
+  assert.equal(await app.runner.run(task, { signal: AbortSignal.abort() }), undefined);
+  assert.deepEqual(app.runner.inspect(task), ready);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 0);
+});
+
+test("selecting a task still enforces current permission and local commit guards", async t => {
+  const f = fixture(t); let allowed = false;
+  const app = f.open([workflow([{ ...save(), execute(db, context) {
+    const result = save().execute(db, context); allowed = false; return result;
+  } }], { authorize: () => allowed ? { status: "allow" } : { status: "rejected", reason: "permission_revoked" } })]);
+  app.runner.enqueue(task, schedule);
+  assert.equal((await app.runner.run(task))?.status, "rejected");
+  assert.equal(await app.runner.run(task), undefined);
+  allowed = true;
+  const second = { ...task, id: "job-2" }; app.runner.enqueue(second, schedule);
+  assert.equal((await app.runner.run(second))?.status, "rejected");
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 0);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM small_hour_operation_receipts").get()?.n, 0);
+});
+
+test("selected permission deferrals retain their due time and finite claim allowance", async t => {
   const f = fixture(t);
+  const app = f.open([workflow([save()], { authorize: () => ({ status: "deferred", dueAt: 200, reason: "wait" }) })]);
+  app.runner.enqueue(task, { ...schedule, maxAttempts: 1 });
+  const deferred = await app.runner.run(task);
+  assert.equal(deferred?.status, "deferred"); assert.equal(deferred?.attempts, 1);
+  assert.equal(await app.runner.run(task), undefined);
+  assert.deepEqual(app.runner.inspect(task), deferred);
+  f.advance(200);
+  const exhausted = await app.runner.run(task);
+  assert.equal(exhausted?.status, "failed"); assert.equal(exhausted?.reason, "attempt_limit");
+  assert.equal(exhausted?.attempts, 1); assert.equal(await app.runner.run(task), undefined);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 0);
+});
+
+test("targeted execution requires the saved manifest and a committed claim", async t => {
+  const f = fixture(t), app = f.open([workflow([save()])]);
+  const queued = app.runner.enqueue(task, schedule);
+  const changed = f.open([workflow([save("different")])]);
+  await assert.rejects(changed.runner.run(task), { code: "contract_conflict" });
+  assert.deepEqual(app.runner.inspect(task), queued);
+  app.db.exec(`CREATE TRIGGER ignore_claim BEFORE UPDATE ON small_hour_tasks
+    WHEN NEW.status = 'running' BEGIN SELECT RAISE(IGNORE); END`);
+  await assert.rejects(app.runner.run(task), { code: "claim_lost" });
+  assert.deepEqual(app.runner.inspect(task), queued);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, 0);
+});
+
+test("selected claims respect live leases, shared scopes and explicit uncertain recovery", async t => {
+  const f = fixture(t), entered = gate(), release = gate(); let calls = 0;
+  const definition = workflow([{ id: "model", kind: "model", prepare: () => ({
+    runtime: model({ name: "fixture", async complete() {
+      calls++; entered.resolve(); await release.promise;
+      return { content: [{ type: "text", text: "late" }], stopReason: "end_turn" };
+    } }), input: { agentId: "a", input: "work", allowedTools: [] },
+  }) }, save()]);
+  const a = f.open([definition]), b = f.open([definition, workflow([save()], { kind: "independent" })]);
+  a.runner.enqueue(task, schedule);
+  const blocked = b.runner.enqueue({ ...task, id: "blocked" }, schedule);
+  const independent = b.runner.enqueue({ ...task, id: "independent", kind: "independent" }, { ...schedule, concurrencyScope: "other" });
+  const pending = a.runner.run(task);
+  const lost = assert.rejects(pending, { code: "claim_lost" });
+  await entered.promise;
+  try {
+    assert.equal(await b.runner.run(task), undefined);
+    assert.equal(await b.runner.run(blocked), undefined);
+    assert.deepEqual(b.runner.inspect(independent), independent);
+    f.advance(201);
+    assert.equal((await b.runner.run(task))?.status, "uncertain");
+    const uncertain = b.runner.inspect(task);
+    assert.equal(await b.runner.run(task), undefined);
+    assert.equal(await b.runner.run(blocked), undefined);
+    assert.deepEqual(b.runner.inspect(task), uncertain);
+    assert.deepEqual(b.runner.inspect(blocked), blocked);
+    assert.equal((await b.runner.run(independent))?.status, "completed");
+  } finally { release.resolve(); }
+  await lost;
+  assert.equal(calls, 1);
+  assert.equal(a.db.prepare("SELECT count(*) n FROM effects").get()?.n, 1);
+});
+
+test("targeted delivery sends only the selected fixed output", async t => {
+  const sent: unknown[] = [];
+  const app = fixture(t).open([workflow([{ id: "deliver", kind: "delivery", sink: {
+    idempotency: "key", async send(request, context) {
+      context.assertActive(); sent.push(request.input); return { status: "accepted", receipt: { id: request.id, evidence: "sink-accepted" } };
+    },
+  } }])]);
+  const earlier = app.runner.enqueue(task, schedule);
+  const selected = { ...task, id: "job-2", input: { ids: ["item-9"] } };
+  app.runner.enqueue(selected, schedule);
+  assert.equal((await app.runner.run(selected))?.status, "completed");
+  assert.deepEqual(sent, [selected.input]); assert.deepEqual(app.runner.inspect(task), earlier);
+  assert.equal(await app.runner.run(selected), undefined);
+  assert.equal(sent.length, 1);
+});
+
+for (const method of ["runNext", "run"] as const) test(`${method}: ordered saved results survive restart without another model call`, async t => {
+  const f = fixture(t);
+  const run = (runner: SqliteTaskRunner<DatabaseSync>) => method === "run" ? runner.run(task) : runner.runNext();
   let calls = 0, available = false;
   const definition = workflow([save("prepare"), { id: "select", kind: "model", prepare(context) {
     assert.deepEqual(context.results.prepare, { id: "prepare-receipt", selectedId: "item-7" });
@@ -66,18 +215,18 @@ test("ordered saved results survive restart and feed one local effect without an
     ? { status: "deferred", dueAt: 200, reason: "destination_unavailable" } : { status: "allow" } });
   const first = f.open([definition]);
   first.runner.enqueue(task, schedule);
-  const deferred = await first.runner.runNext();
+  const deferred = await run(first.runner);
   assert.equal(deferred?.status, "deferred"); assert.equal(deferred?.reason, "destination_unavailable");
   assert.equal(first.db.prepare("SELECT count(*) n FROM effects").get()?.n, 1);
   first.close();
   const second = f.open([definition]);
-  assert.equal(await second.runner.runNext(), undefined);
+  assert.equal(await run(second.runner), undefined);
   available = true; f.advance(200);
-  const completed = await second.runner.runNext();
+  const completed = await run(second.runner);
   assert.equal(completed?.status, "completed"); assert.equal(calls, 1);
   assert.deepEqual(completed?.steps.map(step => step.status), ["completed", "completed", "completed"]);
   assert.equal(second.db.prepare("SELECT count(*) n FROM effects").get()?.n, 2);
-  assert.equal(await second.runner.runNext(), undefined);
+  assert.equal(await run(second.runner), undefined);
   assert.deepEqual(second.runner.enqueue(task, schedule), second.runner.inspect(task));
 });
 
@@ -377,20 +526,20 @@ test("attempt exhaustion retains an interrupted model call and its occupied scop
   await assert.rejects(pending, { code: "claim_lost" }); assert.equal(calls, 1);
 });
 
-function worker(path: string, stage: string) {
+function worker(path: string, stage: string, method = "runNext") {
   const script = fileURLToPath(new URL("./fixtures/task-worker.ts", import.meta.url));
-  return spawn(process.execPath, ["--import", "tsx", script, path, stage], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  return spawn(process.execPath, ["--import", "tsx", script, path, stage, method], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
 }
-for (const stage of ["after-local", "in-model", "after-model"]) {
-  test(`process death ${stage} retains committed effects and resumes only established work`, { timeout: 10000 }, async t => {
-    const f = fixture(t), child = worker(f.path, stage);
+for (const method of ["runNext", "run"] as const) for (const stage of ["after-local", "in-model", "after-model"]) {
+  test(`${method}: process death ${stage} resumes only established work`, { timeout: 10000 }, async t => {
+    const f = fixture(t), child = worker(f.path, stage, method);
     let errors = ""; child.stderr?.setEncoding("utf8").on("data", value => { errors += value; });
     t.after(() => child.kill("SIGKILL"));
     const [code, signal] = await once(child, "close");
     assert.equal(signal, "SIGKILL", `worker failed: ${code}: ${errors}`);
     const app = f.open([]);
     const recovered = new SqliteTaskRunner(app.db, [workerWorkflow(app.db)], { leaseMs: 100, now: () => 201 });
-    const result = await recovered.runNext();
+    const result = method === "run" ? await recovered.run(workerTask) : await recovered.runNext();
     assert.equal(result?.status, stage === "in-model" ? "uncertain" : "completed");
     assert.equal(app.db.prepare("SELECT count(*) n FROM provider_calls").get()?.n, 1);
     assert.equal(app.db.prepare("SELECT count(*) n FROM effects").get()?.n, stage === "in-model" ? 1 : 2);
@@ -398,11 +547,11 @@ for (const stage of ["after-local", "in-model", "after-model"]) {
   });
 }
 
-test("independent processes cannot execute the same claimed task", { timeout: 10000 }, async t => {
-  const f = fixture(t), first = worker(f.path, "race");
+for (const method of ["runNext", "run"] as const) test(`${method}: independent processes cannot execute the same claimed task`, { timeout: 10000 }, async t => {
+  const f = fixture(t), first = worker(f.path, "race", method);
   t.after(() => first.kill("SIGKILL"));
   assert.deepEqual(await once(first, "message"), ["entered", undefined]);
-  const firstClose = once(first, "close"), second = worker(f.path, "race");
+  const firstClose = once(first, "close"), second = worker(f.path, "race", method);
   t.after(() => second.kill("SIGKILL"));
   const secondClose = once(second, "close");
   try {
