@@ -157,7 +157,10 @@ if (!process.argv.includes("--core-only")) {
     const selected = { ...first, id: "selected" };
     const timing = { concurrencyScope: "consumer", dueAt: 100, maxAttempts: 2 };
     const queued = runner.enqueue(first, timing); runner.enqueue(selected, timing);
-    assert.equal((await runner.run(selected)).status, "completed");
+    assert.throws(() => db.prepare("UPDATE small_hour_tasks SET input_json = ? WHERE scope = ? AND id = ?")
+      .run('{"id":"unapproved"}', selected.scope, selected.id), /task contract is immutable/i);
+    const selectedResult = await runner.run(selected);
+    assert.equal(selectedResult.status, "completed"); assert.deepEqual(selectedResult.input, selected.input);
     assert.deepEqual(runner.inspect(first), queued);
     assert.equal(await runner.run(selected), undefined);
     assert.deepEqual(db.prepare("SELECT id FROM task_effects").all().map(row => row.id), ["selected"]);

@@ -1,18 +1,22 @@
 # Install and upgrade
 
-Requires Node.js 26.10+ with ESM imports. Install the built [0.13.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.13.0):
+Requires Node.js 26.10+ with ESM imports. Install the built [0.13.1 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.13.1):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.13.0/small-hour-0.13.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.13.1/small-hour-0.13.1.tgz
 ```
 
 Commit your manifest and lockfile; `npm ci` verifies recorded integrity. Releases include `SHA256SUMS`.
 
-Artifacts contain JavaScript and TypeScript declarations. Public npm publication is not configured. Source installs require `nvm use`, `npm ci`, and `npm run build` at a pinned commit.
+Artifacts include JavaScript and TypeScript declarations. Public npm publication is not configured. Source installs require `nvm use`, `npm ci`, and `npm run build` at a pinned commit.
+
+## Task contract guards
+
+After upgrading, stop task writers and call `runner.initialize()` to install [SQLite contract guards](storage-schema.md#relationships-and-authority) without rewriting rows. Already altered input needs application reconciliation. Setup supports enclosing transactions.
 
 ## Admission pauses
 
-Stop workers and upgrade readers before enabling [admission pauses](admission-pauses.md). `runner.initialize()` adds `admission_pauses`, defaulting existing tasks to zero without changing their limits. Setup can join an app transaction. Older packages reject opted-in contracts and paused tasks.
+Stop workers and upgrade readers before enabling [admission pauses](admission-pauses.md). `runner.initialize()` adds `admission_pauses`, defaulting existing tasks to zero without changing their limits. Older packages reject opted-in contracts and paused tasks.
 
 ## 0.11.0
 
@@ -23,8 +27,6 @@ Spending schema initialization can join an app transaction or savepoint. Commit 
 No table migration from 0.10.0. Denials use the existing `quote_json` decision snapshot in format 3. **Upgrade all readers before writing explicit denials:** older readers reject them. Existing quoted records keep their meaning.
 
 ## 0.10.0
-
-This version adds [timestamps](storage-schema.md#lifecycle-timestamps), initializes stores required by registered steps, and includes receipts with completed local steps.
 
 **Databases predating 0.10.0 require an upgrade.**
 
@@ -58,6 +60,6 @@ When crossing earlier releases, also read [older-version upgrade requirements](u
 
 Run `npm run check` and `npm run check:package`. The latter tests public exports and recovery in a separately installed consumer. CI uses `.nvmrc`.
 
-Use `npm run check:package -- --out-dir /absolute/release-directory` to retain verified files. Review the version and exact commit, tag it, and attach that artifact and checksum. Applications upgrade separately.
+Use `npm run check:package -- --out-dir /absolute/release-directory` to retain verified files. Tag the reviewed commit and attach its artifact and checksum. Applications upgrade separately.
 
 Checks use controlled responses; live model quality and application integration need separate verification.

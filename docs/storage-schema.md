@@ -1,17 +1,19 @@
 # Storage reference
 
-See [why storage is useful](storage.md). This page maps records, tables, and timestamps.
+See [why storage is useful](storage.md).
 
 ## Relationships and authority
 
-`scope` and `id` together identify an operation, model step, task, or delivery. Receipts and model steps can exist without a task. Runner step IDs derive from the task and step identities; delivery evidence uses the delivery task's identity.
+`scope` and `id` identify saved work. Local receipts and model steps may exist independently. Task-step identities derive from the task and step; delivery evidence shares its task's identity.
 
-This ERD shows selected columns. Dotted lines are relationships enforced by application/runtime code. Only the spending membership link is a SQL foreign key.
+The ERD shows selected columns. Dotted relationships are enforced by runtime code; the spending link is a SQL foreign key.
+
+SQLite guards protect accepted task identity, input, steps, and original schedule, including concurrency scope. Current due times and execution progress remain mutable. Applications control deletion and schema access; the guards do not prevent deliberate database tampering.
 
 ```mermaid
 erDiagram
     accTitle: Small Hour's saved records
-    accDescr: Tasks may have local receipts, model steps, or delivery evidence. Each spending call has budget memberships that reference its single charge. Only that membership relationship is a database foreign key.
+    accDescr: Tasks link to local receipts, model steps or delivery evidence. Spending memberships reference a single charge through a SQL foreign key.
     small_hour_tasks |o..o{ small_hour_operation_receipts : "local steps (logical)"
     small_hour_tasks |o..o{ small_hour_model_steps : "model steps (logical)"
     small_hour_tasks ||..o| small_hour_deliveries : "delivery task (logical)"
@@ -19,7 +21,9 @@ erDiagram
     small_hour_tasks {
         TEXT scope PK
         TEXT id PK
+        TEXT input_json "fixed accepted input"
         TEXT plan_json "fixed workflow steps"
+        TEXT schedule_json "fixed original schedule"
         TEXT status "execution progress"
         INTEGER attempts "all task claims"
         INTEGER admission_pauses "claims paused at admission"
@@ -51,9 +55,9 @@ erDiagram
     }
 ```
 
-Enable SQLite foreign-key checks. Budget memberships point to one call; they have no independent balance. Keep both tables together. `quote_json` stores the admission decision: a cost quote or explicit denial with scopes, reason, and evidence. Denials have zero exposure. Spending call IDs also appear in model reports.
+Enable SQLite foreign-key checks. Budget memberships reference one call's balance; keep both tables together. `quote_json` stores a cost quote or explicit denial with scopes, reason, and evidence. Denials have zero exposure. Spending call IDs also appear in model reports.
 
-For [admission pauses](admission-pauses.md), `admission_pauses` counts claim credits backed by saved model refusals. Credits cannot release money or erase history.
+`admission_pauses` counts [claim credits](admission-pauses.md) backed by model refusals; credits cannot release money or erase history.
 
 ## Lifecycle timestamps
 
@@ -65,7 +69,7 @@ All six tables have nullable `created_at` and `updated_at` columns. Public recor
 - Budget memberships keep their admission times; settlement updates the call row.
 - Migrated records keep unknown historical times. A later change can set `updatedAt` while `createdAt` stays `null`.
 
-Standalone stores accept `{ now: () => milliseconds }`; the default is `Date.now`. The runner shares its clock with its stores. Update times never move backward; equal times are possible. They cannot establish a remote outcome or authorize recovery.
+Stores accept `{ now: () => milliseconds }`, defaulting to `Date.now`. The runner shares its clock with its stores. Times never move backward; equal times are possible. Timestamps cannot establish remote outcomes or authorize recovery.
 
 Local receipts and enqueued tasks remain provisional until an enclosing transaction commits; these timestamps do not record that outer commit. Delivery timestamps describe local evidence, not remote receipt time. Unattempted deliveries have null times.
 

@@ -16,13 +16,13 @@ A workflow has `kind`, `version`, ordered unique step IDs, and synchronous `auth
 | `model` | Synchronous `prepare(context)` returns `{ runtime, input }`. |
 | `delivery` | App-supplied sending function; must be the only step. See [delivery](delivery.md). |
 
-Context includes the task, step ID, preceding results, cancellation signal, and `assertActive()`. Preparation, parsing, authorization, and retry selection must have no effects.
+Context includes the task, step ID, preceding results, signal, and `assertActive()`. Preparation, parsing, authorization, and retry selection must have no effects.
 
-`enqueue(request, { concurrencyScope, dueAt, maxAttempts })` saves an [operation identity](local-operations.md#identity-and-results), step definition, and schedule. Exact duplicates return existing state; changes conflict. Enqueue can join a local transaction, remaining provisional until commit.
+`enqueue(request, { concurrencyScope, dueAt, maxAttempts })` saves the [identity](local-operations.md#identity-and-results), input, steps, and original schedule. Exact duplicates return existing state. SQLite rejects contract updates and conflicting replacements. Enqueue can join a transaction; acceptance requires commit.
 
 ## Run work
 
-`run({ scope, id }, { signal? })` selects only that task. `runNext({ signal? })` selects the next eligible task. Both return inspected state with any transient `error`, or `undefined` when none is eligible. Targeting never falls through to another task. Use `inspect(key)` for saved state.
+`run({ scope, id }, { signal? })` selects only that task. `runNext({ signal? })` selects the next eligible task. Both return inspected state with any transient `error`, or `undefined` when none is eligible. Targeting never falls through to another task.
 
 ```mermaid
 flowchart LR
