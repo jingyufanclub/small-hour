@@ -160,7 +160,9 @@ test("rejected choice parsing uses the same private error boundary", async () =>
   assert.ok(!JSON.stringify(selected.requests).includes(secret));
 });
 
-for (const feedback of ["private", "model-safe"]) test(`a committed write with lost ${feedback} acknowledgement cannot authorize replay`, async t => {
+for (const { feedback, receipt } of [
+  { feedback: "private", receipt: true }, { feedback: "model-safe", receipt: false },
+]) test(`a committed write with ${feedback} feedback and ${receipt ? "a" : "no"} receipt cannot authorize replay`, async t => {
   const db = new DatabaseSync(":memory:"); t.after(() => db.close());
   db.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
   const events: TraceEvent[] = [];
@@ -168,14 +170,14 @@ for (const feedback of ["private", "model-safe"]) test(`a committed write with l
   const tools = new ToolRegistry([{ name: "write", description: "Write", inputSchema: {}, parse: parseEmpty,
     execute(_, context) {
       const saved = db.prepare("INSERT INTO notes (body) VALUES (?)").run("saved once");
-      context.recordReceipt(`note-${saved.lastInsertRowid}`);
+      if (receipt) context.recordReceipt(`note-${saved.lastInsertRowid}`);
       throw feedback === "model-safe" ? new ModelSafeToolError("Please try again.", { cause: new Error(secret) }) : new Error(secret);
     } }]);
   await assert.rejects(runtime(selected.provider, tools, events).turn({ agentId: "app", input: "write", allowedTools: ["write"] }), error => {
     assert.ok(error instanceof RuntimeError);
     assert.equal(error.code, "tool_outcome_unknown");
     assert.equal(error.report?.toolCalls[0].status, "unknown");
-    assert.deepEqual(error.report.toolCalls[0].receiptIds, ["note-1"]);
+    assert.deepEqual(error.report.toolCalls[0].receiptIds, receipt ? ["note-1"] : []);
     assert.ok(!JSON.stringify(error.report).includes(secret));
     return true;
   });
