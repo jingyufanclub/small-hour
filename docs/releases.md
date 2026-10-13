@@ -10,10 +10,6 @@ Commit your manifest and lockfile; `npm ci` verifies recorded integrity. Release
 
 Artifacts contain JavaScript and TypeScript declarations. Public npm publication is not configured. Source users pin a commit and run `nvm use`, `npm ci`, and `npm run build`.
 
-## 0.12.0
-
-`SqliteTaskRunner.run(key, options)` runs only the selected eligible task. Missing/ineligible keys return `undefined`. No schema or attempt-policy changes from 0.11.0.
-
 ## 0.11.0
 
 Spending schema initialization can join an app transaction or savepoint. Commit setup before execution; admission, settlement, and reconciliation still require independent transactions.
