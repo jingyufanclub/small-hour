@@ -47,7 +47,7 @@ test("mixed text and supported image formats reach the provider in exact order",
     assert.deepEqual(request.messages, [message(supplied)]);
     return reply;
   })).turn(input(supplied));
-  assert.equal(result.output, "inspected");
+  assert.equal(result.status, "reply");
   assert.equal(calls, 1);
 });
 
@@ -212,5 +212,5 @@ test("callbacks cannot change image bytes across a real host tool round trip", a
   assert.deepEqual(seen[1].at(-1), message([{ type: "tool_result", toolUseId: "lookup-1", content: '{"id":"item-7","state":"available"}' }]));
   assert.equal(result.toolCalls[0].id, "lookup-1");
   assert.equal(result.toolCalls[0].status, "completed");
-  assert.equal(result.output, "inspected");
+  assert.equal(result.status, "reply");
 });

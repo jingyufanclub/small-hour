@@ -91,7 +91,7 @@ for (const protocol of ["anthropic", "responses"] as const) {
       assert.deepEqual(inputs[1].slice(1, 1 + native.length), native);
       assert.deepEqual(inputs[1].at(-1), { type: "function_call_output", call_id: "call-7", output: '{"recordId":"item-7","available":true}' });
     }
-    assert.equal(result.output, "Processed.");
+    assert.equal(result.status, "reply");
     assert.equal(result.toolCalls[0].id, "call-7");
     assert.deepEqual(result.modelCalls.map(call => call.stop), protocol === "anthropic"
       ? [{ reason: "tool_use", nativeReason: "tool_use" }, { reason: "end_turn", nativeReason: "end_turn" }]

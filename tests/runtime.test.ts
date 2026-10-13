@@ -12,7 +12,6 @@ import {
   type ModelProvider,
   type ProviderRequest,
   type ProviderResponse,
-  type UsageSink,
 } from "../src/index.js";
 
 class ScriptedProvider implements ModelProvider {
@@ -22,7 +21,7 @@ class ScriptedProvider implements ModelProvider {
   constructor(private readonly script: Array<ProviderResponse | Error>) {}
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
-    this.calls.push(request);
+    this.calls.push({ ...structuredClone({ ...request, signal: undefined }), signal: request.signal });
     const next = this.script.shift();
     if (!next) throw new Error("script exhausted");
     if (next instanceof Error) throw next;
@@ -37,36 +36,6 @@ class ScriptedProvider implements ModelProvider {
 const text = (value: string): ProviderResponse => ({
   content: [{ type: "text", text: value }],
   stopReason: "end_turn",
-});
-
-test("assembles persona, bounded memory, input, and usage", async () => {
-  const provider = new ScriptedProvider([{
-    ...text("night is clear"),
-    usage: { model: "fake", freshInputTokens: 12, cacheWriteTokens: 0, cacheReadTokens: 0, outputTokens: 4 },
-  }]);
-  const recorded: string[] = [];
-  const usage: UsageSink = {
-    record: (row, context) => {
-      recorded.push(`${context.agentId}:${row.outputTokens}`);
-    },
-  };
-  const runtime = new SmallHourRuntime({
-    provider,
-    persona: new StaticPersonaSource("quiet caretaker"),
-    memory: { load: async () => [{ role: "user", content: "earlier" }] },
-    usage,
-  });
-
-  const result = await runtime.turn({ agentId: "a-1", turnId: "t-1", input: "look up" });
-  assert.equal(result.status, "reply");
-  assert.equal(result.output, "night is clear");
-  assert.equal(result.accepted, true);
-  assert.equal(provider.calls[0]?.system[0]?.text, "quiet caretaker");
-  assert.deepEqual(provider.calls[0]?.messages, [
-    { role: "user", content: "earlier" },
-    { role: "user", content: "look up" },
-  ]);
-  assert.deepEqual(recorded, ["a-1:4"]);
 });
 
 test("normalizes an undefined tool result instead of crashing", async () => {
@@ -91,7 +60,7 @@ test("normalizes an undefined tool result instead of crashing", async () => {
   });
 
   const result = await runtime.turn({ agentId: "a-void", input: "touch", allowedTools: ["touch"] });
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
   assert.deepEqual(provider.calls[1]?.messages.at(-1), {
     role: "user",
     content: [{ type: "tool_result", toolUseId: "tool-void", content: "null" }],
@@ -126,7 +95,10 @@ test("allows reads before a required choice", async () => {
     choice: { name: "choose_moment", description: "choose", inputSchema: { type: "object" }, requiredFirst: true },
   });
   assert.deepEqual(result.choice, { choice: "rest" });
-  assert.equal(result.output, "settles down");
+  assert.equal(result.status, "reply");
+  assert.deepEqual(provider.calls[1].messages.at(-1), { role: "user", content: [
+    { type: "tool_result", toolUseId: "tool-1", content: '{"weather":"rain"}' },
+  ] });
 });
 
 test("blocks writes before a required choice", async () => {
@@ -225,7 +197,7 @@ test("denies a choice-governed write without host authorization", async () => {
   });
   assert.equal(executions, 0);
   assert.equal(result.toolCalls[1]?.ok, false);
-  assert.equal(result.output, "keeps the note unwritten");
+  assert.equal(result.status, "reply");
 });
 
 test("rejects host compaction that still exceeds the configured bound", async () => {

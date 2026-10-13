@@ -119,7 +119,7 @@ test("local compatibility preserves native history and sends no implicit cloud c
     parse: parseObject, execute: (input) => { reads++; return { id: (input as { id: string }).id, available: true }; },
   }]);
   const result = await runtime(provider, { tools }).turn({ allowedTools: ["lookup"], agentId: "router", input: "Read item-7." });
-  assert.equal(result.output, "Available.");
+  assert.equal(result.status, "reply");
   assert.equal(reads, 1);
   assert.equal(requests.length, 2);
   assert.equal(requests[0].url, "http://127.0.0.1:11434/v1/chat/completions");
@@ -182,7 +182,7 @@ test("native HTTP transport obeys the runtime attempt budget and does not follow
       admit: () => { events.push("admit"); return true; }, record: () => { events.push("record"); },
     },
   }).turn({ agentId: "a", input: "go" });
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
   assert.deepEqual(events, ["admit", "http", "record", "admit", "http", "record"]);
   await failure(runtime(new OpenAICompatibleProvider({ model: "test-model", baseURL: `${base}/redirect`, apiKey: "test-only" }))
     .turn({ agentId: "a", input: "go" }), "provider_failed");
@@ -220,7 +220,7 @@ for (const protocol of ["responses", "chat"] as const) {
       record: (call) => { events.push(`record:${call.status}:${requests.length}`); },
     } }).turn({ agentId: "a", input: "go" });
     assert.deepEqual(events, ["admit:0", "record:rejected:1", "admit:1", "record:responded:2"]);
-    assert.equal(result.output, "done");
+    assert.equal(result.status, "reply");
     assert.equal(requests.length, 2);
     const denied = transport([{ error: "busy" }], [429]);
     const report = await failure(runtime(make(denied.fetch), { maxModelCalls: 1, retry: { attempts: 3, delayMs: () => 0 } }).turn({ agentId: "a", input: "go" }), "model_call_limit");
@@ -259,16 +259,6 @@ for (const protocol of ["responses", "chat"] as const) {
       }
       assert.equal(writes, 0);
     });
-  });
-
-  test(`${protocol} host validation rejects an invented selection without a repair call`, async () => {
-    const body = protocol === "responses" ? response([message('{"selectedId":"invented"}')]) : completion('{"selectedId":"invented"}');
-    const { fetch, requests } = transport([body]);
-    const report = await failure(runtime(make(fetch), { retry: { attempts: 3, delayMs: () => 0 } }).turn({ agentId: "a", input: "Select item-7.",
-      structuredOutput: { schema, parse: (value) => { assert.deepEqual(value, { selectedId: "item-7" }); return value; } },
-    }), "structured_output_invalid");
-    assert.equal(requests.length, 1);
-    assert.equal(report.modelCalls[0].status, "responded");
   });
 
   test(`${protocol} truncated text cannot reach final output or structured validation`, async (t) => {

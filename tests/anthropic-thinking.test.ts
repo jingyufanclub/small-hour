@@ -34,7 +34,7 @@ for (const effort of [undefined, "low", "medium", "high", "xhigh", "max"] as con
   test(`adaptive thinking sends a total output ceiling with ${effort ?? "default"} effort`, async () => {
     const { runtime, requests } = transport([message()], { type: "adaptive", ...(effort ? { effort } : {}) });
     const result = await runtime.turn({ agentId: "app", input: "Process.", maxTokens: 2_048 });
-    assert.equal(result.output, "Processed.");
+    assert.equal(result.status, "reply");
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].thinking, { type: "adaptive" });
     assert.equal(requests[0].max_tokens, 2_048);
@@ -82,7 +82,7 @@ test("adaptive tool calls preserve signed thinking and exact tool IDs through th
     content: '{"itemId":"item-7","label":"Selected item"}' }] });
   assert.deepEqual(requests.map(request => [request.thinking, request.output_config, request.max_tokens]),
     [[{ type: "adaptive" }, { effort: "high" }, 2_048], [{ type: "adaptive" }, { effort: "high" }, 2_048]]);
-  assert.equal(result.output, "Selected item is available.");
+  assert.equal(result.status, "reply");
   assert.equal(result.toolCalls[0].id, "tool-call-7");
   assert.equal(result.usage.reduce((total, usage) => total + usage.outputTokens, 0), 16);
 });

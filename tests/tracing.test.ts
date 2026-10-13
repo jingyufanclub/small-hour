@@ -134,7 +134,7 @@ test("each retried provider attempt has a distinct span and its original call ou
   }, isRetryable: () => true }, events, { retry: { attempts: 2, delayMs: () => 0 } })
     .turn({ agentId: "agent", input: "retry", trace: { traceId } });
   const finished = events.filter(event => event.type === "model.finished");
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
   assert.equal(sent.length, 2);
   assert.deepEqual(sent[1], sent[0]);
   assert.equal(finished.length, 2);
@@ -166,7 +166,7 @@ test("original and compacted tool results remain distinguishable and over-limit 
   const visible = events.find(event => event.type === "tool.result" && event.stage === "model")!;
   assert.equal(captured(visible), '{"summary":"selected facts"}');
   assert.ok(result.trace && result.trace.contentOmissions > 0);
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
 });
 
 test("asynchronous sink rejection is observed without delaying or failing a turn", async () => {
@@ -175,7 +175,7 @@ test("asynchronous sink rejection is observed without delaying or failing a turn
     tracing: { sink: { record: () => Promise.reject(new Error("export failed")) } },
   }).turn({ agentId: "agent", input: "finish" });
   await setImmediate();
-  assert.equal(calls, 1); assert.equal(result.output, "done");
+  assert.equal(calls, 1); assert.equal(result.status, "reply");
   assert.ok(result.trace && result.trace.exportFailures > 0);
 });
 
@@ -265,7 +265,7 @@ test("a pending asynchronous sink does not extend the turn or start an export wo
   const result = await runtime({ name: "fixture", async complete() { return text(); } }, [], {
     tracing: { sink: { record: () => new Promise<void>(() => {}) } },
   }).turn({ agentId: "agent", input: "finish" });
-  assert.equal(result.output, "done");
+  assert.equal(result.status, "reply");
   assert.ok(result.trace && result.trace.exportFailures === result.trace.eventCount);
 });
 

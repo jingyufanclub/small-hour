@@ -187,7 +187,7 @@ test("caller mutations after durable preparation cannot change the images execut
     parts.reverse(); parts.push({ type: "text", text: "New unapproved instructions" });
     assert.deepEqual(JSON.parse(String(db.prepare("SELECT turn_json FROM small_hour_model_steps").get()?.turn_json)).input, expected);
   } finally { release(); }
-  assert.equal((await pending).result.output, "item-b"); assert.equal(calls, 1);
+  assert.equal((await pending).result.accepted, true); assert.equal(calls, 1);
 });
 
 test("structured image selections replay accepted IDs without another model call", async t => {

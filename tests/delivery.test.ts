@@ -85,6 +85,38 @@ test("a saved model result stages one output with its local receipt and transpor
   assert.equal(restarted.db.prepare("SELECT count(*) n FROM small_hour_operation_receipts").get()?.n, 1);
 });
 
+test("failed output staging rolls back the local effect and receipt while retaining the model result", async t => {
+  const f = fixture(t); let calls = 0, sends = 0;
+  const runtime = new SmallHourRuntime({ persona: new StaticPersonaSource("Compose the output."), memory: new EmptyMemorySource(),
+    provider: { name: "fixture", async complete() {
+      calls++; return { content: [{ type: "text", text: product.input.result.text }], stopReason: "end_turn" };
+    } } });
+  const creation: TaskWorkflow<DatabaseSync> = { kind: "create-output", version: "1", authorize: () => ({ status: "allow" }), steps: [
+    { id: "compose", kind: "model", prepare: () => ({ runtime, input: { agentId: "a", input: "Compose.", allowedTools: [] } }) },
+    { id: "save", kind: "local", parseResult: value => value, execute(db) {
+      db.prepare("INSERT INTO effects VALUES (?)").run(product.id);
+      app.runner.enqueue(product, schedule); return { outputId: product.id };
+    } },
+  ] };
+  const sink = workflow({ idempotency: "none", async send() { sends++; return accepted; } });
+  const app = f.open([creation, sink]);
+  app.db.exec(`CREATE TABLE effects (id TEXT PRIMARY KEY);
+    CREATE TRIGGER unavailable_output BEFORE INSERT ON small_hour_tasks
+    WHEN NEW.kind='publish-result' BEGIN SELECT RAISE(ABORT,'output storage unavailable'); END`);
+  const task = { ...product, id: "creation:7", kind: creation.kind };
+  app.runner.enqueue(task, { ...schedule, concurrencyScope: "creation:7" });
+  assert.equal((await app.runner.runNext())?.status, "failed"); app.close();
+  const reopened = f.open([creation, sink]);
+  assert.equal(reopened.runner.inspect(task)?.steps[0].status, "completed");
+  assert.equal((reopened.runner.inspect(task)?.steps[0].result as { output: string }).output, product.input.result.text);
+  assert.equal(reopened.runner.inspect(task)?.steps[1].status, "not_started");
+  assert.equal(reopened.db.prepare("SELECT count(*) n FROM effects").get()?.n, 0);
+  assert.equal(reopened.db.prepare("SELECT count(*) n FROM small_hour_operation_receipts").get()?.n, 0);
+  assert.equal(reopened.runner.inspect(product), undefined);
+  assert.equal(await reopened.runner.runNext(), undefined);
+  assert.equal(calls, 1); assert.equal(sends, 0);
+});
+
 test("duplicate dispatch holds one claim while the sink is in flight", async t => {
   const f = fixture(t), entered = gate(), release = gate(); let sends = 0;
   const definition = workflow({ idempotency: "none", async send() { sends++; entered.resolve(); await release.promise; return accepted; } });

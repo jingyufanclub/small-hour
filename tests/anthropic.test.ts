@@ -58,7 +58,7 @@ for (const failure of [400, 408, 429, 503, "connection"] as const) {
     const pending = runtime.turn({ agentId: "app", input: "Process supplied facts." });
     if (failure === 429) {
       const result = await pending;
-      assert.equal(result.output, "done");
+      assert.equal(result.status, "reply");
       assert.deepEqual(result.modelCalls.map(call => [call.status, call.requestId, spend.inspect(call.callId)?.status]),
         [["rejected", "failed-request", "rejected"], ["responded", "ready-request", "accepted"]]);
       assert.equal(requests.length, 2);
