@@ -77,6 +77,8 @@ test("unknown calls keep every allowance across restart until one evidenced reco
   const app = fixture(t), first = app.open(); let calls = 0;
   const result = await runtime(first.spend, { name: "fixture", async complete() { calls++; return { ...response, usage: undefined }; } }).turn(input);
   const id = result.modelCalls[0].callId; first.close(); const reopened = app.open();
+  assert.equal(reopened.spend.inspect(id)?.status, "unknown");
+  assert.equal(reopened.spend.inspect(id)?.record?.status, "responded");
   for (const { scope } of limits) assert.equal(reopened.spend.inspectBudget(scope).unknownAmount, 10);
   const provider: ModelProvider = { name: "fixture", async complete() { calls++; return response; } };
   await assert.rejects(runtime(reopened.spend, provider).turn(input), { code: "model_call_denied" });
@@ -208,4 +210,5 @@ for (const stage of ["in-provider", "before-settlement"]) test(`process death ${
   await assert.rejects(runtime(recovered.spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input), { code: "model_call_denied" });
   assert.equal(calls, 0);
   for (const { scope } of limits) assert.equal(recovered.spend.inspectBudget(scope).reservedAmount, 10);
+  assert.equal(recovered.db.prepare("SELECT count(*) n FROM provider_calls").get()?.n, 1);
 });

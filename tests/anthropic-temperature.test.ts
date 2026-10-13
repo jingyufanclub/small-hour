@@ -35,6 +35,8 @@ for (const temperature of [undefined, 0, 0.5, 1]) {
     assert.equal(requests[0].temperature, temperature);
     assert.equal(Object.hasOwn(requests[0], "temperature"), temperature !== undefined);
     assert.equal(requests[0].max_tokens, 512);
+    assert.equal(requests[0].tools, undefined);
+    assert.deepEqual(requests[0].messages, [{ role: "user", content: "item-2" }]);
     assert.deepEqual(requests[0].output_config, { format: { type: "json_schema", schema } });
     const captured = events.find(event => event.type === "model.request" && event.format === "provider");
     assert.equal(captured?.content?.status, "captured");

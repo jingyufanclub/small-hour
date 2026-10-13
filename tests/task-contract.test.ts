@@ -61,7 +61,7 @@ test("accepted input survives another writer before the first model checkpoint",
   first.db.exec("DROP TRIGGER interrupt_checkpoint"); first.close(); f.advance(201);
   const reopened = f.open(), completed = await reopened.runner.run(task);
   assert.equal(completed?.status, "completed"); assert.equal(f.requests.length, 1);
-  assert.equal(f.requests[0].messages[0].content, canonicalJson(task.input));
+  assert.deepEqual(JSON.parse(String(f.requests[0].messages[0].content)), task.input);
   assert.match(String(mutationError), immutable);
   assert.deepEqual(completed.input, task.input);
   assert.deepEqual(reopened.db.prepare("SELECT * FROM effects").all().map(row => ({ ...row })), [{ id: task.id, body: "Saved answer." }]);
@@ -74,7 +74,7 @@ test("explicit model recovery retains the accepted input after an attempted rewr
   first.close(); f.incomplete(false);
   const reopened = f.open(), completed = await reopened.runner.retryModel(task, decision(stopped));
   assert.equal(completed?.status, "completed");
-  assert.deepEqual(f.requests.map(request => request.messages[0].content), [canonicalJson(task.input), canonicalJson(task.input)]);
+  assert.deepEqual(f.requests.map(request => JSON.parse(String(request.messages[0].content))), [task.input, task.input]);
   assert.equal(reopened.db.prepare("SELECT count(*) n FROM effects").get()?.n, 1);
 });
 

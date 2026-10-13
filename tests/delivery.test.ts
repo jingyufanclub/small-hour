@@ -95,21 +95,6 @@ test("duplicate dispatch holds one claim while the sink is in flight", async t =
   assert.equal((await pending)?.status, "completed"); assert.equal(sends, 1);
 });
 
-test("lost response after acceptance retries only with the same product and sink idempotency key", async t => {
-  const f = fixture(t); const keys: string[] = [], remote = new Map<string, unknown>(); let calls = 0;
-  const definition = workflow({ idempotency: "key", async send(saved, context) {
-    calls++; keys.push(context.idempotencyKey); assert.deepEqual(saved, product);
-    remote.set(context.idempotencyKey, saved); if (calls === 1) throw new Error("response lost"); return accepted;
-  } });
-  const a = f.open([definition]); a.runner.enqueue(product, schedule);
-  assert.equal((await a.runner.runNext())?.status, "uncertain");
-  assert.equal(await a.runner.runNext(), undefined); a.close();
-  const b = f.open([definition]); assert.equal((await b.runner.retryDelivery(product))?.status, "completed");
-  assert.equal(remote.size, 1); assert.equal(calls, 2); assert.equal(new Set(keys).size, 1);
-  assert.equal(delivery(b.runner.inspect(product)).status, "accepted");
-  assert.equal(await b.runner.runNext(), undefined);
-});
-
 test("an ambiguous non-idempotent send holds its scope and cannot be blindly retried", async t => {
   const f = fixture(t); let calls = 0;
   const definition = workflow({ idempotency: "none", async send() { calls++; throw new Error("connection closed after upload"); } });

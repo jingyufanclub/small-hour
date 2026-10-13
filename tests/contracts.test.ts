@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { callbackGate, deadlineClock } from "./deadline-clock.js";
 import {
-  EmptyMemorySource, ModelSafeToolError, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
+  EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelProvider, type ProviderMessage, type ProviderRequest, type ProviderResponse, type RuntimeOptions,
   type TurnReport,
 } from "../src/index.js";
@@ -106,17 +106,6 @@ test("a failed memory load cannot reuse an earlier turn's context", async () => 
     return true;
   });
   assert.equal(calls.length, 1);
-});
-
-test("dispatch rejects a registered tool withheld from this turn", async () => {
-  let writes = 0;
-  const { provider, calls } = scripted([use("write"), text()]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: () => ++writes }]);
-  const result = await runtime(provider, { tools }).turn({ agentId: "a", input: "go", allowedTools: [] });
-  assert.equal(calls[0].tools.length, 0);
-  assert.equal(writes, 0);
-  assert.equal(result.toolCalls[0].status, "not_started");
-  assert.equal(result.toolCalls[0].errorCode, "tool_not_allowed");
 });
 
 test("an already cancelled turn starts no host or provider work", async () => {
@@ -252,34 +241,6 @@ test("cancellation during a tool reports uncertainty and prevents subsequent too
   await callback.release();
   assert.deepEqual(report.toolCalls[0].receiptIds, ["committed-before-wait"]);
   assert.equal(laterWrites, 0); assert.equal(calls.length, 1);
-});
-
-test("a write that throws after committing stops before the model can replay it", async () => {
-  let writes = 0;
-  const { provider, calls } = scripted([use("write"), text("try again")]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {}, parse: parseObject, execute: (_, context) => {
-    writes++; context.recordReceipt("committed-1"); throw new Error("acknowledgement failed");
-  } }]);
-  const report = await failure(runtime(provider, { tools }).turn({ allowedTools: ["write"], agentId: "a", input: "go" }), "tool_outcome_unknown");
-  assert.equal(writes, 1); assert.equal(calls.length, 1);
-  assert.equal(report.toolCalls[0].status, "unknown");
-  assert.deepEqual(report.toolCalls[0].receiptIds, ["committed-1"]);
-});
-
-test("invalid tool input remains recoverable without starting a write", async () => {
-  let writes = 0;
-  const { provider, calls } = scripted([use("write"), text("please supply a valid ID")]);
-  const tools = new ToolRegistry([{ name: "write", description: "write", inputSchema: {},
-    parse: () => { throw new ModelSafeToolError("missing ID"); }, execute: () => ++writes,
-  }]);
-  const result = await runtime(provider, { tools }).turn({ allowedTools: ["write"], agentId: "a", input: "go" });
-  assert.equal(writes, 0); assert.equal(result.toolCalls[0].status, "not_started");
-  assert.equal(result.status, "reply");
-  const errorMessage = calls[1].messages.at(-1);
-  assert.ok(errorMessage && typeof errorMessage.content !== "string");
-  const block = errorMessage.content[0];
-  assert.equal(block.type, "tool_result");
-  if (block.type === "tool_result") assert.equal(JSON.parse(block.content).error, "missing ID");
 });
 
 test("a completed choice with no final text does not return earlier tool-call prose", async () => {

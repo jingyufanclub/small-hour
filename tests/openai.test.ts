@@ -49,11 +49,15 @@ async function failure(promise: Promise<unknown>, code: string) {
 }
 
 test("OpenAI sends app context and exact schema in a stateless Responses request", async () => {
-  const { fetch, requests } = transport([response([message('{"selectedId":"item-7"}')])]);
-  const provider = new OpenAIProvider({ model: "test-model", apiKey: "test-key", fetch, reasoningEffort: "low" });
+  const value = { selectedId: "item-7", note: null, sourceIds: ["source-2", "source-1"] };
+  const outputSchema = { type: "object", properties: { ...schema.properties,
+    note: { type: ["string", "null"] }, sourceIds: { type: "array", items: { type: "string" } },
+  }, required: ["selectedId", "note", "sourceIds"], additionalProperties: false };
+  const { fetch, requests } = transport([response([{ ...message(JSON.stringify(value)), phase: null }])]);
+  const provider = new OpenAIProvider({ model: "requested-model", apiKey: "test-key", fetch, reasoningEffort: "max" });
   const result = await runtime(provider, { memory: { load: async () => [{ role: "user", content: "The pending selection is item-7." }] } })
-    .turn({ agentId: "router", input: "Use that selection.", maxTokens: 900, structuredOutput: { schema,
-      parse: (value) => { assert.deepEqual(value, { selectedId: "item-7" }); return value; },
+    .turn({ agentId: "router", input: "Use that selection.", maxTokens: 900, structuredOutput: { schema: outputSchema,
+      parse: (parsed) => { assert.deepEqual(parsed, value); return parsed; },
     } });
   assert.equal(requests.length, 1);
   const request = requests[0];
@@ -65,9 +69,12 @@ test("OpenAI sends app context and exact schema in a stateless Responses request
   assert.equal(request.body.truncation, "disabled");
   assert.equal(request.body.previous_response_id, undefined);
   assert.equal(request.body.max_output_tokens, 900);
-  assert.deepEqual(request.body.reasoning, { effort: "low" });
-  assert.deepEqual(request.body.text.format, { type: "json_schema", name: "small_hour_result", strict: true, schema });
-  assert.deepEqual(result.value, { selectedId: "item-7" });
+  assert.equal(request.body.model, "requested-model");
+  assert.deepEqual(request.body.reasoning, { effort: "max" });
+  assert.deepEqual(request.body.text.format, { type: "json_schema", name: "small_hour_result", strict: true, schema: outputSchema });
+  assert.equal(request.body.tools, undefined);
+  assert.deepEqual(result.value, value);
+  assert.equal(result.accepted, true);
   assert.equal(result.modelCalls[0].requestId, "request-1");
   assert.deepEqual(result.modelCalls[0].stop, { reason: "end_turn" });
   assert.deepEqual(result.usage[0], { model: "test-model", freshInputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0, outputTokens: 8 });
@@ -90,19 +97,12 @@ test("OpenAI preserves native reasoning, phases, and tool call IDs through a rea
   assert.equal(reads, 1);
   assert.equal(result.output, "Available.");
   assert.equal(requests[0].body.tools[0].type, "function");
+  assert.equal(requests[0].body.tools[0].strict, true);
   assert.deepEqual(requests[0].body.tools[0].parameters, lookupSchema);
   assert.deepEqual(requests[1].body.input.slice(1, 1 + native.length), native);
   assert.deepEqual(requests[1].body.input.at(-1), { type: "function_call_output", call_id: "call-7", output: '{"id":"item-7","available":true}' });
   assert.equal(result.toolCalls[0].id, "call-7");
   assert.deepEqual(result.modelCalls.map(call => call.stop), [{ reason: "tool_use" }, { reason: "end_turn" }]);
-});
-
-test("OpenAI accepts a completed answer with a null phase", async () => {
-  const { fetch, requests } = transport([response([{ ...message("Available."), phase: null }])]);
-  const result = await runtime(new OpenAIProvider({ model: "test-model", apiKey: "test-key", fetch }))
-    .turn({ agentId: "router", input: "Read the supplied state." });
-  assert.equal(result.output, "Available.");
-  assert.equal(requests.length, 1);
 });
 
 test("local compatibility preserves native history and sends no implicit cloud credential", async (t) => {
@@ -127,6 +127,7 @@ test("local compatibility preserves native history and sends no implicit cloud c
   assert.equal(requests[0].body.max_tokens, 512);
   assert.equal(requests[0].body.stream, false);
   assert.equal(requests[0].body.tools[0].function.name, "lookup");
+  assert.equal(requests[0].body.tools[0].function.strict, true);
   assert.deepEqual(requests[1].body.messages.at(-1), { role: "tool", tool_call_id: "local-call", content: '{"id":"item-7","available":true}' });
   assert.deepEqual(requests[1].body.messages.at(-2), native);
   assert.deepEqual(result.modelCalls.map(call => call.stop), [{ reason: "tool_use" }, { reason: "end_turn" }]);

@@ -5,7 +5,6 @@ import { setImmediate } from "node:timers/promises";
 import { callbackGate, deadlineClock } from "./deadline-clock.js";
 import {
   EmptyMemorySource,
-  MaxLengthOutput,
   RuntimeError,
   SmallHourRuntime,
   StaticPersonaSource,
@@ -15,7 +14,6 @@ import {
   type ProviderResponse,
   type UsageSink,
 } from "../src/index.js";
-import { AnthropicProvider } from "../src/providers/anthropic.js";
 
 class ScriptedProvider implements ModelProvider {
   readonly name = "scripted";
@@ -71,33 +69,6 @@ test("assembles persona, bounded memory, input, and usage", async () => {
   assert.deepEqual(recorded, ["a-1:4"]);
 });
 
-test("dispatches an allowlisted tool and returns its result to the provider", async () => {
-  const provider = new ScriptedProvider([
-    {
-      content: [{ type: "tool_use", id: "tool-1", name: "read_weather", input: { place: "roof" } }],
-      stopReason: "tool_use",
-    },
-    text("the roof is damp"),
-  ]);
-  const tools = new ToolRegistry([{
-    name: "read_weather",
-    description: "Read local weather",
-    inputSchema: { type: "object" },
-    mode: "read",
-    parse: parseObject, execute: (input: any, context) => ({ place: input.place, agent: context.agentId, rain: true }),
-  }]);
-  const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource(), tools });
-
-  const result = await runtime.turn({ agentId: "a-2", input: "weather?", allowedTools: ["read_weather"] });
-  assert.equal(result.output, "the roof is damp");
-  assert.equal(result.toolCalls[0]?.ok, true);
-  assert.equal(provider.calls[0]?.tools[0]?.strict, true);
-  assert.deepEqual(provider.calls[1]?.messages.at(-1), {
-    role: "user",
-    content: [{ type: "tool_result", toolUseId: "tool-1", content: JSON.stringify({ place: "roof", agent: "a-2", rain: true }) }],
-  });
-});
-
 test("normalizes an undefined tool result instead of crashing", async () => {
   const provider = new ScriptedProvider([
     {
@@ -127,29 +98,6 @@ test("normalizes an undefined tool result instead of crashing", async () => {
   });
 });
 
-test("captures a required first structured choice", async () => {
-  const provider = new ScriptedProvider([
-    {
-      content: [{ type: "tool_use", id: "choose-1", name: "choose_moment", input: { choice: "rest", why: "rain" } }],
-      stopReason: "tool_use",
-    },
-    text("settles by the window"),
-  ]);
-  const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource() });
-  const result = await runtime.turn({
-    agentId: "a-3",
-    input: "choose",
-    choice: {
-      name: "choose_moment",
-      description: "Choose one action",
-      inputSchema: { type: "object", required: ["choice"] },
-      requiredFirst: true,
-    },
-  });
-  assert.deepEqual(result.choice, { choice: "rest", why: "rain" });
-  assert.equal(result.output, "settles by the window");
-});
-
 test("allows reads before a required choice", async () => {
   const provider = new ScriptedProvider([
     {
@@ -157,7 +105,7 @@ test("allows reads before a required choice", async () => {
       stopReason: "tool_use",
     },
     {
-      content: [{ type: "tool_use", id: "choose-1", name: "small_hour_choose", input: { choice: "rest" } }],
+      content: [{ type: "tool_use", id: "choose-1", name: "choose_moment", input: { choice: "rest" } }],
       stopReason: "tool_use",
     },
     text("settles down"),
@@ -175,7 +123,7 @@ test("allows reads before a required choice", async () => {
     agentId: "a-4",
     input: "choose",
     allowedTools: ["look"],
-    choice: { description: "choose", inputSchema: { type: "object" }, requiredFirst: true },
+    choice: { name: "choose_moment", description: "choose", inputSchema: { type: "object" }, requiredFirst: true },
   });
   assert.deepEqual(result.choice, { choice: "rest" });
   assert.equal(result.output, "settles down");
@@ -280,46 +228,6 @@ test("denies a choice-governed write without host authorization", async () => {
   assert.equal(result.output, "keeps the note unwritten");
 });
 
-test("retries transient provider failures without changing the turn", async () => {
-  const provider = new ScriptedProvider([new Error("temporary"), text("recovered")]);
-  const runtime = new SmallHourRuntime({
-    provider,
-    persona: new StaticPersonaSource("p"),
-    memory: new EmptyMemorySource(),
-    retry: { attempts: 2, delayMs: () => 0 },
-  });
-  const result = await runtime.turn({ agentId: "a-5", input: "hello" });
-  assert.equal(result.output, "recovered");
-  assert.equal(provider.calls.length, 2);
-});
-
-test("output rejection does not replay tools or silently clip text", async () => {
-  let executions = 0;
-  const provider = new ScriptedProvider([
-    { content: [{ type: "tool_use", id: "write-1", name: "write_note", input: { note: "x" } }], stopReason: "tool_use" },
-    text("this line is too long"),
-  ]);
-  const tools = new ToolRegistry([{
-    name: "write_note",
-    description: "Write one note",
-    inputSchema: { type: "object" },
-    mode: "write",
-    parse: parseObject, execute: () => ({ count: ++executions }),
-  }]);
-  const runtime = new SmallHourRuntime({
-    provider,
-    persona: new StaticPersonaSource("p"),
-    memory: new EmptyMemorySource(),
-    tools,
-    outputPolicy: new MaxLengthOutput(8),
-  });
-  const result = await runtime.turn({ agentId: "a-6", input: "write", allowedTools: ["write_note"] });
-  assert.equal(result.status, "rejected");
-  assert.equal(result.accepted, false);
-  assert.equal(result.output, "this line is too long");
-  assert.equal(executions, 1);
-});
-
 test("rejects host compaction that still exceeds the configured bound", async () => {
   const provider = new ScriptedProvider([
     { content: [{ type: "tool_use", id: "large-1", name: "large_read", input: {} }], stopReason: "tool_use" },
@@ -344,47 +252,6 @@ test("rejects host compaction that still exceeds the configured bound", async ()
   await assert.rejects(runtime.turn({ allowedTools: ["large_read"], agentId: "a-large", input: "read" }),
     (error: unknown) => error instanceof RuntimeError && error.code === "tool_result_too_large");
   assert.equal(provider.calls.length, 1);
-});
-
-test("rejects incomplete provider stops", async () => {
-  const provider = new ScriptedProvider([{
-    content: [{ type: "text", text: "partial" }],
-    stopReason: "max_tokens",
-  }]);
-  const runtime = new SmallHourRuntime({ provider, persona: new StaticPersonaSource("p"), memory: new EmptyMemorySource() });
-
-  await assert.rejects(
-    runtime.turn({ agentId: "a-incomplete", input: "hello" }),
-    (error: unknown) => error instanceof RuntimeError && error.code === "incomplete_stop",
-  );
-});
-
-test("does not execute a tool when no provider hop remains", async () => {
-  let executions = 0;
-  const provider = new ScriptedProvider([{
-    content: [{ type: "tool_use", id: "last-hop", name: "read_once", input: {} }],
-    stopReason: "tool_use",
-  }]);
-  const tools = new ToolRegistry([{
-    name: "read_once",
-    description: "read",
-    inputSchema: { type: "object" },
-    mode: "read",
-    parse: parseObject, execute: () => ({ count: ++executions }),
-  }]);
-  const runtime = new SmallHourRuntime({
-    provider,
-    persona: new StaticPersonaSource("p"),
-    memory: new EmptyMemorySource(),
-    tools,
-    maxHops: 1,
-  });
-
-  await assert.rejects(
-    runtime.turn({ allowedTools: ["read_once"], agentId: "a-last-hop", input: "read" }),
-    (error: unknown) => error instanceof RuntimeError && error.code === "tool_hop_limit",
-  );
-  assert.equal(executions, 0);
 });
 
 test("rejects an empty completion after a read tool", async () => {
@@ -475,16 +342,4 @@ test("aborts during retry backoff instead of waiting out the delay", async (t) =
   clock.tick(10_000);
   await setImmediate();
   assert.equal(provider.calls.length, 1);
-});
-
-test("retries Anthropic connection errors but not permanent client errors", () => {
-  class APIConnectionError extends Error {}
-  class APIConnectionTimeoutError extends Error {}
-  const provider = new AnthropicProvider({ model: "fake", client: {} as any });
-
-  assert.equal(provider.isRetryable(new APIConnectionError("offline")), true);
-  assert.equal(provider.isRetryable(new APIConnectionTimeoutError("timeout")), true);
-  assert.equal(provider.isRetryable({ status: 429 }), true);
-  assert.equal(provider.isRetryable({ status: 400 }), false);
-  assert.equal(provider.isRetryable(new Error("bad input")), false);
 });

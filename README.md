@@ -54,6 +54,6 @@ This allows one model attempt and no tools. See [execution limits](docs/executio
 - Optional [saved work](docs/storage.md) uses your SQLite connection to preserve completed results for recovery.
 - [Security](docs/security.md) · [Releases and upgrades](docs/releases.md)
 
-Development: `npm run check`; package verification: `npm run check:package`.
+Development: `npm run check`; package verification: `npm run check:package`. See [what the tests verify](docs/testing.md).
 
 Copyright 2026 Jing Yu. [Apache-2.0](LICENSE).

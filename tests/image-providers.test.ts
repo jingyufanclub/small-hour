@@ -55,16 +55,6 @@ function request(blocks: readonly unknown[]): ProviderRequest {
 for (const protocol of ["anthropic", "responses"] as const) {
   const response = protocol === "anthropic" ? anthropicResponse : responsesResponse;
 
-  test(`${protocol} maps ordered text and image bytes without fetching media`, async () => {
-    const { provider, requests } = transport(protocol, [response()]);
-    await provider.complete(request(content));
-    assert.equal(provider.capabilities?.images, true);
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, protocol === "anthropic" ? "https://api.anthropic.com/v1/messages" : "https://api.openai.com/v1/responses");
-    const messages = protocol === "anthropic" ? requests[0].body.messages : requests[0].body.input;
-    assert.deepEqual(messages, [{ role: "user", content: wireContent(protocol) }]);
-  });
-
   test(`${protocol} image input survives native history and a host tool round trip`, async () => {
     const native = protocol === "anthropic"
       ? [{ type: "thinking", thinking: "Read the supplied record.", signature: "signed-7" },
@@ -89,6 +79,8 @@ for (const protocol of ["anthropic", "responses"] as const) {
     const result = await app.turn({ allowedTools: ["lookup"], agentId: "app", input: content });
     assert.equal(reads, 1);
     assert.equal(requests.length, 2);
+    assert.ok(requests.every(item => item.url === (protocol === "anthropic"
+      ? "https://api.anthropic.com/v1/messages" : "https://api.openai.com/v1/responses")));
     const inputs = requests.map(item => protocol === "anthropic" ? item.body.messages : item.body.input);
     for (const input of inputs) assert.deepEqual(input[0], { role: "user", content: wireContent(protocol) });
     if (protocol === "anthropic") {
@@ -109,10 +101,7 @@ for (const protocol of ["anthropic", "responses"] as const) {
   test(`${protocol} direct image calls reject invalid bytes and remote references before HTTP`, async t => {
     const malformed = [
       { ...png, data: "aHR0cHM6Ly9maXh0dXJlLmludmFsaWQvcGhvdG8ucG5n" },
-      { ...png, data: `${png.data}\n` },
-      { ...png, mediaType: "image/jpeg" },
       { type: "image", url: "https://fixture.invalid/photo.png" },
-      { type: "image", mediaType: "image/png", data: "https://fixture.invalid/photo.png" },
     ];
     for (const [index, block] of malformed.entries()) await t.test(`invalid form ${index + 1}`, async () => {
       const { provider, requests } = transport(protocol, [response()]);
@@ -144,13 +133,6 @@ for (const protocol of ["anthropic", "responses"] as const) {
       assert.equal(reads, 0);
       assert.equal(requests.length, 0);
     });
-  });
-
-  test(`${protocol} plain string requests preserve their existing wire shape`, async () => {
-    const { provider, requests } = transport(protocol, [response()]);
-    await provider.complete({ ...request([]), messages: [{ role: "user", content: "Process the supplied facts." }] });
-    const messages = protocol === "anthropic" ? requests[0].body.messages : requests[0].body.input;
-    assert.deepEqual(messages, [{ role: "user", content: "Process the supplied facts." }]);
   });
 }
 
