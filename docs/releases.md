@@ -1,14 +1,18 @@
 # Install and upgrade
 
-Requires Node.js 26.10+ with ESM imports. Install the built [0.13.1 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.13.1):
+Requires Node.js 26.10+ with ESM imports. Install the built [0.14.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.14.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.13.1/small-hour-0.13.1.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.14.0/small-hour-0.14.0.tgz
 ```
 
 Commit your manifest and lockfile; `npm ci` verifies recorded integrity. Releases include `SHA256SUMS`.
 
 Artifacts include JavaScript and TypeScript declarations. Public npm publication is not configured. Source installs require `nvm use`, `npm ci`, and `npm run build` at a pinned commit.
+
+## Worker claim recovery
+
+Stop all task writers before upgrading and call `runner.initialize()`. It adds nullable `worker_id` and `claim_revocations_json` (an empty history for existing tasks) without changing saved steps or attempts. Start upgraded writers together; mixed-version task writers are unsupported. Historical running claims have no worker identity and retain lease-based recovery unless the host independently holds exact termination evidence.
 
 ## Task contract guards
 

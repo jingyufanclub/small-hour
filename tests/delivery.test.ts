@@ -393,3 +393,24 @@ test("an authorization status and due time survive a reason shared with a prior 
   assert.equal(postponed.status, "deferred"); if (postponed.status === "deferred") assert.equal(postponed.dueAt, 500);
   policy = 2; f.advance(500); assert.equal(delivery(await app.runner.runNext()).status, "rejected"); assert.equal(sends, 1);
 });
+
+test("revoking a stopped delivery worker preserves uncertainty until the original receipt arrives", async t => {
+  const f = fixture(t), entered = gate(), release = gate(); let sends = 0;
+  const definition = workflow({ idempotency: "none", async send() {
+    sends++; entered.resolve(); await release.promise; return accepted;
+  } });
+  const a = f.open([definition]), b = f.open([definition]);
+  a.runner.enqueue(product, schedule);
+  const oldOutcome = a.runner.run(product).then(() => null, error => error);
+  await entered.promise;
+  try {
+    const running = b.runner.inspect(product)!;
+    const revoked = b.runner.revokeClaim(product, { claim: running.claim!, reason: "Supervisor confirmed exit", evidence: { workerStopped: true } });
+    assert.equal(revoked.status, "uncertain");
+    assert.equal((await b.runner.retryDelivery(product))?.status, "uncertain");
+    assert.equal(sends, 1, "worker loss cannot prove a remote send failed");
+  } finally { release.resolve(); }
+  assert.equal((await oldOutcome)?.code, "claim_lost");
+  assert.equal((await b.runner.retryDelivery(product))?.status, "completed");
+  assert.equal(sends, 1);
+});

@@ -21,10 +21,10 @@ function runtime(provider: ModelProvider, options: Partial<RuntimeOptions> = {})
 function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), "small-hour-retry-model-")), connections = new Set<DatabaseSync>();
   let now = 100;
-  const open = (definition: TaskWorkflow<DatabaseSync>) => {
+  const open = (definition: TaskWorkflow<DatabaseSync>, workerId?: string) => {
     const db = new DatabaseSync(join(directory, "app.sqlite")); connections.add(db);
     db.exec("CREATE TABLE IF NOT EXISTS effects (id INTEGER PRIMARY KEY, body TEXT NOT NULL)");
-    const runner = new SqliteTaskRunner(db, [definition], { leaseMs: 100, now: () => now }); runner.initialize();
+    const runner = new SqliteTaskRunner(db, [definition], { leaseMs: 100, now: () => now, workerId }); runner.initialize();
     return { db, runner, close: () => { db.close(); connections.delete(db); } };
   };
   t.after(() => { for (const db of connections) db.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -219,4 +219,59 @@ test("a superseded worker's late response cannot replace the recovered output", 
   assert.equal(current.steps[1].model?.attempts[0].report.modelCalls[0].stop?.reason, "end_turn");
   assert.equal(b.db.prepare("SELECT count(*) n FROM effects WHERE body = 'obsolete output'").get()?.n, 0);
   assert.equal(calls, 2);
+});
+
+
+test("verified worker loss releases only its exact claim and fences late output without repeating effects", async t => {
+  const f = fixture(t), entered = gate(), release = gate(); let calls = 0;
+  const workflow = definition(runtime({ name: "fixture", async complete() {
+    const first = ++calls === 1;
+    if (first) { entered.resolve(); await release.promise; }
+    return { content: [{ type: "text", text: first ? "Obsolete." : "Recovered." }], stopReason: "end_turn" };
+  } }));
+  const a = f.open(workflow, "worker-a"), b = f.open(workflow, "worker-b");
+  a.runner.enqueue(task, schedule);
+  const old = a.runner.run(task); const oldOutcome = old.then(() => null, error => error);
+  await entered.promise;
+  try {
+    const running = b.runner.inspect(task)!;
+    assert.equal(running.claim?.workerId, "worker-a");
+    assert.equal(await b.runner.run(task), undefined, "an unrevoked live claim cannot be stolen");
+    const revocation = { claim: running.claim!, reason: "Supervisor confirmed worker exit", evidence: { exitedWorker: "worker-a" } };
+    assert.throws(() => b.runner.revokeClaim(task, { ...revocation, claim: { ...running.claim!, token: "stale" } }), { code: "task_changed" });
+    const uncertain = b.runner.revokeClaim(task, revocation);
+    assert.equal(uncertain.status, "uncertain");
+    assert.equal(uncertain.attempts, 1, "revocation cannot reset or consume the attempt allowance");
+    assert.equal(uncertain.claim, null);
+    assert.equal(uncertain.claimRevocations.length, 1);
+    assert.equal(calls, 1, "revocation cannot itself authorize another model call");
+    assert.equal((await b.runner.retryModel(task, decision(uncertain)))?.status, "completed");
+    assert.throws(() => b.runner.revokeClaim(task, revocation), { code: "task_changed" });
+    assert.equal(calls, 2);
+    assert.equal(b.db.prepare("SELECT count(*) n FROM effects WHERE body = 'item-7'").get()?.n, 1);
+    assert.equal(b.db.prepare("SELECT count(*) n FROM effects WHERE body = 'Recovered.'").get()?.n, 1);
+  } finally { release.resolve(); }
+  assert.equal((await oldOutcome)?.code, "claim_lost");
+  const current = b.runner.inspect(task)!;
+  assert.equal(current.status, "completed");
+  assert.equal((current.steps[1].result as { output: string }).output, "Recovered.");
+  assert.equal(b.db.prepare("SELECT count(*) n FROM effects WHERE body = 'Obsolete.'").get()?.n, 0);
+});
+
+test("verified worker loss reuses a saved model result after final task storage failed", async t => {
+  const f = fixture(t); let calls = 0;
+  const workflow = definition(runtime({ name: "fixture", async complete() {
+    calls++; return { content: [{ type: "text", text: "Saved." }], stopReason: "end_turn" };
+  } }));
+  const a = f.open(workflow, "worker-a"); a.runner.enqueue(task, schedule);
+  a.db.exec("CREATE TRIGGER fail_finish BEFORE UPDATE OF status ON small_hour_tasks WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'storage interruption'); END");
+  await assert.rejects(a.runner.run(task), /storage interruption/);
+  const running = a.runner.inspect(task)!;
+  assert.equal(running.steps[1].status, "completed");
+  a.db.exec("DROP TRIGGER fail_finish"); a.close();
+  const b = f.open(workflow, "worker-b");
+  b.runner.revokeClaim(task, { claim: running.claim!, reason: "Supervisor confirmed worker exit", evidence: { exitedWorker: "worker-a" } });
+  assert.equal((await b.runner.run(task))?.status, "completed");
+  assert.equal(calls, 1);
+  assert.equal(b.db.prepare("SELECT count(*) n FROM effects").get()?.n, 2);
 });
