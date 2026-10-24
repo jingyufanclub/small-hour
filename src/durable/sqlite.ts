@@ -7,7 +7,7 @@ export { SqliteModelStepStore, ModelStepError, type ModelStepState, type ModelSt
 export { SqliteModelSpendStore, ModelSpendError, type ModelSpendQuote, type ModelSpendPolicy,
   type ModelSpendDenial, type ModelSpendDecision, type ModelSpendScope, type ModelSpendResolution, type ModelSpendRecord, type ModelSpendBudget } from "./model-spend.js";
 export { SqliteTaskRunner, TaskError, type TaskWorkflow, type TaskStep, type TaskContext,
-  type TaskState, type TaskRunResult, type TaskStepState, type TaskStatus, type TaskPermission, type TaskSchedule, type TaskResolution } from "./tasks.js";
+  type TaskState, type TaskRunResult, type TaskStepState, type TaskStatus, type TaskPermission, type TaskSchedule, type TaskResolution, type TaskClaim, type TaskClaimRevocation } from "./tasks.js";
 
 export { DeliveryError, type DeliverySink, type DeliveryContext, type DeliveryReceipt, type DeliveryOutcome, type DeliveryAttempt, type DeliveryState } from "./delivery.js";
 

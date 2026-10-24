@@ -6,7 +6,7 @@ Your app defines and submits tasks and decides when to call the runner. **Small 
 
 ## Define and submit
 
-Construct it with a synchronous SQLite connection, workflows, and `{ leaseMs, now? }`. `initialize()` prepares their stores; initialize spending separately.
+Construct it with a synchronous SQLite connection, workflows, and `{ leaseMs, now?, workerId? }`. `initialize()` prepares their stores; initialize spending separately.
 
 A workflow has `kind`, `version`, ordered unique step IDs, and synchronous `authorize(context)`.
 
@@ -53,6 +53,24 @@ Leases renew between steps; allow longer than the longest step. There is no hear
 - `cancel(key, reason)`: stop queued/deferred/paused work or request cancellation of running/uncertain work. Completed effects remain.
 - `retry(error, context)`: optional scheduling of rolled-back local work within its attempt limit.
 - `retryModel(...)`: explicit [recovery of eligible model work](model-recovery.md#through-the-task-runner); unfinished model work never repeats automatically.
+- `revokeClaim(key, { claim, reason, evidence })`: invalidate the exact inspected claim after the host verifies its worker stopped.
 - `resolve(key, { status, reason, evidence })`: close verified uncertain work as failed/cancelled without replay or refund.
 
 Storage errors propagate. Replace or restore the connection after `rollback_failed`. Retain evidence and compatible handlers through [upgrades](releases.md).
+
+## Confirmed worker loss
+
+An optional opaque `workerId` identifies each claim's owner. `inspect(key).claim` supplies that identity and the exact token. After the host proves that owner stopped, `revokeClaim` atomically invalidates the token and saves the decision in `claimRevocations`. A stale decision cannot revoke a replacement worker. No lease timeout must elapse first.
+
+The host owns proof of termination. A disconnected client, slow call, expired health check or newly started server is insufficient. The runtime performs no process detection and starts no worker. Without verified termination, retain normal lease protection.
+
+Revocation preserves completed steps, original input, attempt limits and spending evidence. Unfinished model or delivery steps become uncertain and still require explicit reconciliation/recovery. Otherwise the task becomes immediately eligible, unless cancelled. A late revoked worker cannot commit later steps or accept output; remote charges/effects may still need reconciliation. Permissions are checked when execution resumes.
+
+```mermaid
+flowchart LR
+    Host[Host verifies worker stopped] --> Revoke[Revoke exact inspected claim]
+    Revoke --> Fence[Old token cannot commit]
+    Revoke --> Inspect[Preserve saved step evidence]
+    Inspect -->|Unfinished remote work| Uncertain[Explicit recovery or reconciliation]
+    Inspect -->|No uncertain step| Eligible[Resume with completed results]
+```

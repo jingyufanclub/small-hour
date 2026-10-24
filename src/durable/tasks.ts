@@ -33,6 +33,8 @@ export interface TaskWorkflow<Database> {
   authorize(context: TaskContext): TaskPermission;
   retry?(error: unknown, context: TaskContext): { dueAt: number; reason: string } | undefined;
 }
+export interface TaskClaim { token: string; workerId: string | null }
+export interface TaskClaimRevocation { claim: TaskClaim; reason: string; evidence: unknown; revokedAt: number }
 export interface TaskResolution { status: "failed" | "cancelled"; reason: string; evidence: unknown }
 type CompletedDelivery = Extract<DeliveryState, { status: "accepted" | "confirmed" }>;
 type CompletedModelStep = Extract<ModelStepState, { status: "completed" }>;
@@ -60,6 +62,8 @@ export interface TaskState extends OperationRequest, TaskSchedule, RecordTimesta
   reason: string | null;
   cancellationReason: string | null;
   leaseUntil: number | null;
+  claim: TaskClaim | null;
+  claimRevocations: TaskClaimRevocation[];
   resolution: TaskResolution | null;
   steps: TaskStepState[];
 }
@@ -74,7 +78,7 @@ type Stop = { status: "cancelled" | "rejected" | "deferred"; reason: string; due
 class TaskStopped extends Error { constructor(readonly outcome: Stop) { super(outcome.reason); } }
 type Plan = ({ id: string; kind: "local" } | { id: string; kind: "model"; recovery?: ModelRecoveryContract }
   | { id: string; kind: "delivery"; idempotency: "key" | "none"; reconciliation: boolean })[];
-type StoredTask = Omit<TaskState, "steps"> & { plan: Plan; token: string | null; scheduleJson: string };
+type StoredTask = Omit<TaskState, "steps" | "claim"> & { plan: Plan; token: string | null; workerId: string | null; scheduleJson: string };
 type Key = Pick<OperationRequest, "scope" | "id">;
 type ModelRecovery = ModelStepRecoveryDecision & { stepId: string };
 type ClaimSelection = { key?: Key; recovery?: never } | { key: Key; recovery: ModelRecovery | "delivery" };
@@ -132,9 +136,12 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
   private readonly deliveries: DeliveryLedger;
   private readonly leaseMs: number;
   private readonly now: () => number;
+  private readonly workerId: string | null;
 
-  constructor(private readonly database: Database, workflows: readonly TaskWorkflow<Database>[], options: { leaseMs: number; now?: () => number }) {
+  constructor(private readonly database: Database, workflows: readonly TaskWorkflow<Database>[], options: { leaseMs: number; now?: () => number; workerId?: string }) {
     integer(options.leaseMs, 1);
+    if (options.workerId !== undefined) nonempty(options.workerId);
+    this.workerId = options.workerId ?? null;
     this.leaseMs = options.leaseMs; this.now = options.now ?? Date.now;
     const keys = new Set<string>();
     this.workflows = workflows.map(workflow => {
@@ -173,6 +180,12 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     if (!this.database.prepare("SELECT name FROM pragma_table_info('small_hour_tasks') WHERE name = 'admission_pauses'").get()) {
       this.database.exec(`ALTER TABLE small_hour_tasks ADD COLUMN admission_pauses INTEGER NOT NULL DEFAULT 0
         CHECK (typeof(admission_pauses) = 'integer' AND admission_pauses BETWEEN 0 AND 9007199254740991)`);
+    }
+    if (!this.database.prepare("SELECT name FROM pragma_table_info('small_hour_tasks') WHERE name = 'worker_id'").get()) {
+      this.database.exec("ALTER TABLE small_hour_tasks ADD COLUMN worker_id TEXT");
+    }
+    if (!this.database.prepare("SELECT name FROM pragma_table_info('small_hour_tasks') WHERE name = 'claim_revocations_json'").get()) {
+      this.database.exec("ALTER TABLE small_hour_tasks ADD COLUMN claim_revocations_json TEXT NOT NULL DEFAULT '[]'");
     }
     this.database.exec(`CREATE TRIGGER IF NOT EXISTS small_hour_tasks_contract_update
       BEFORE UPDATE OF scope, id, kind, version, input_json, plan_json, schedule_json, concurrency_scope ON small_hour_tasks
@@ -222,7 +235,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
   private snapshot(key: Key): TaskState | undefined {
     const task = this.read(key);
     if (!task) return undefined;
-    const { plan, token: _token, scheduleJson: _schedule, ...state } = task;
+    const { plan, token, workerId, scheduleJson: _schedule, ...state } = task;
     const steps: TaskStepState[] = plan.map(step => {
       const request = step.kind === "delivery" ? identity(task) : operation(task, step);
       if (step.kind === "delivery") {
@@ -262,7 +275,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         throw new TaskError("invalid_task", "A paused task requires a refused model admission.");
       }
     }
-    return { ...state, steps };
+    return { ...state, claim: token === null ? null : { token, workerId }, steps };
   }
 
   cancel(key: Key, reason: string): TaskState {
@@ -275,6 +288,32 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         status = CASE WHEN status IN ('running', 'uncertain') THEN status ELSE 'cancelled' END,
         reason = CASE WHEN status IN ('running', 'uncertain') THEN reason ELSE ? END, updated_at = ? WHERE scope = ? AND id = ?`)
         .run(reason, reason, recordTime(this.now, task.updatedAt), key.scope, key.id));
+    });
+    return this.inspect(key)!;
+  }
+
+  revokeClaim(key: Key, decision: Omit<TaskClaimRevocation, "revokedAt">): TaskState {
+    let selected: Omit<TaskClaimRevocation, "revokedAt">;
+    try {
+      nonempty(decision.claim.token); nonempty(decision.reason);
+      if (decision.claim.workerId !== null) nonempty(decision.claim.workerId);
+      if (decision.evidence == null) throw new TypeError("Worker termination requires evidence");
+      selected = JSON.parse(canonicalJson({ claim: decision.claim, reason: decision.reason, evidence: decision.evidence }));
+    } catch (cause) { throw new TaskError("invalid_request", "Claim revocation requires the inspected claim and verified worker-stop evidence.", { cause }); }
+    this.transaction(() => {
+      const task = this.required(key);
+      if (task.status !== "running" || task.token !== selected.claim.token || task.workerId !== selected.claim.workerId) {
+        throw new TaskError("task_changed", "The inspected claim is no longer current.");
+      }
+      const state = this.snapshot(key)!;
+      const unresolved = state.steps.some(step => step.status === "unresolved");
+      const status = unresolved ? "uncertain" : task.cancellationReason ? "cancelled" : "deferred";
+      const time = recordTime(this.now, task.updatedAt);
+      const history = [...task.claimRevocations, { ...selected, revokedAt: time }];
+      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, due_at = ?,
+        token = NULL, worker_id = NULL, lease_until = NULL, claim_revocations_json = ?, updated_at = ?
+        WHERE scope = ? AND id = ? AND token = ?`)
+        .run(status, task.cancellationReason ?? selected.reason, this.time(), canonicalJson(history), time, key.scope, key.id, selected.claim.token));
     });
     return this.inspect(key)!;
   }
@@ -524,13 +563,13 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         const status = delivered ? (task.cancellationReason ? "cancelled" : "completed") : uncertain ? "uncertain" : "failed";
         const reason = delivered ? task.cancellationReason : "attempt_limit";
         if (task.status !== status || task.reason !== reason || task.token !== null || task.leaseUntil !== null) {
-          this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, token = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ?`)
+          this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, token = NULL, worker_id = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ?`)
             .run(status, reason, recordTime(this.now, task.updatedAt), task.scope, task.id));
         }
       } else {
         const expires = now + this.leaseMs; integer(expires);
-        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = 'running', token = ?, lease_until = ?, attempts = attempts + 1, reason = NULL, updated_at = ? WHERE scope = ? AND id = ?`)
-          .run(randomUUID(), expires, recordTime(this.now, task.updatedAt), task.scope, task.id));
+        this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = 'running', token = ?, worker_id = ?, lease_until = ?, attempts = attempts + 1, reason = NULL, updated_at = ? WHERE scope = ? AND id = ?`)
+          .run(randomUUID(), this.workerId, expires, recordTime(this.now, task.updatedAt), task.scope, task.id));
       }
       return this.required(task);
     });
@@ -563,7 +602,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
         throw new TaskError("task_changed", "The refused admission changed before the task could pause.");
       }
       this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, admission_pauses = admission_pauses + 1,
-        token = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ? AND token = ?`)
+        token = NULL, worker_id = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ? AND token = ?`)
         .run(current.cancellationReason ? "cancelled" : "paused", current.cancellationReason ?? "model_admission_denied",
           recordTime(this.now, current.updatedAt), task.scope, task.id, task.token));
     });
@@ -573,7 +612,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
     this.transaction(() => {
       const current = this.fenced(task);
       if (current.cancellationReason && status !== "uncertain") { status = "cancelled"; reason = current.cancellationReason; }
-      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, due_at = ?, token = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ? AND token = ?`)
+      this.changed(this.database.prepare(`UPDATE small_hour_tasks SET status = ?, reason = ?, due_at = ?, token = NULL, worker_id = NULL, lease_until = NULL, updated_at = ? WHERE scope = ? AND id = ? AND token = ?`)
         .run(status, reason, dueAt, recordTime(this.now, current.updatedAt), task.scope, task.id, task.token));
     });
     return this.inspect(task)!;
@@ -613,7 +652,17 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       if (!["queued", "running", "deferred", "paused", "completed", "cancelled", "rejected", "failed", "uncertain"].includes(status)) throw new TypeError("Invalid status");
       if (status === "queued" ? row.attempts !== 0 : status !== "cancelled" && row.attempts === 0) throw new TypeError("Status and attempts disagree");
       if (status === "running") { nonempty(row.token); integer(row.lease_until); }
-      else if (row.token !== null || row.lease_until !== null) throw new TypeError("Unexpected claim");
+      else if (row.token !== null || row.lease_until !== null || row.worker_id !== null) throw new TypeError("Unexpected claim");
+      if (row.worker_id !== null) nonempty(row.worker_id);
+      const revocations = JSON.parse(row.claim_revocations_json as string) as TaskClaimRevocation[];
+      if (!Array.isArray(revocations) || revocations.length > row.attempts || canonicalJson(revocations) !== row.claim_revocations_json) throw new TypeError("Invalid claim history");
+      const tokens = new Set<string>();
+      for (const revoked of revocations) {
+        nonempty(revoked.claim.token); nonempty(revoked.reason); integer(revoked.revokedAt);
+        if (revoked.claim.workerId !== null) nonempty(revoked.claim.workerId);
+        if (revoked.evidence == null || tokens.has(revoked.claim.token) || revoked.claim.token === row.token) throw new TypeError("Invalid revoked claim");
+        tokens.add(revoked.claim.token);
+      }
       if (["deferred", "paused", "cancelled", "rejected", "failed", "uncertain"].includes(status)) nonempty(row.reason);
       else if (row.reason !== null) throw new TypeError("Unexpected reason");
       if (row.cancellation_reason !== null) nonempty(row.cancellation_reason);
@@ -623,7 +672,7 @@ export class SqliteTaskRunner<Database extends SqliteDatabase> {
       return { ...request, ...timing, ...readTimestamps(row), dueAt: row.due_at as number, plan: steps, status, attempts: row.attempts,
         admissionPauses: row.admission_pauses,
         reason: row.reason as string | null, cancellationReason: row.cancellation_reason as string | null,
-        token: row.token as string | null, leaseUntil: row.lease_until as number | null, resolution, scheduleJson: row.schedule_json as string };
+        token: row.token as string | null, workerId: row.worker_id as string | null, claimRevocations: revocations, leaseUntil: row.lease_until as number | null, resolution, scheduleJson: row.schedule_json as string };
     } catch (cause) { throw new TaskError("invalid_task", "The saved task failed validation.", { cause }); }
   }
   private savepoint<T>(work: () => T): T {

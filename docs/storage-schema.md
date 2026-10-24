@@ -25,6 +25,8 @@ erDiagram
         TEXT plan_json "fixed workflow steps"
         TEXT schedule_json "fixed original schedule"
         TEXT status "execution progress"
+        TEXT worker_id "current claim owner, optional"
+        TEXT claim_revocations_json "verified claim release evidence"
         INTEGER attempts "all task claims"
         INTEGER admission_pauses "claims paused at admission"
     }
