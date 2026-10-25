@@ -107,6 +107,7 @@ export async function completeModelCall(
         call = { ...call, status: "responded" };
         report.modelCalls[callIndex] = call;
         call.requestId = response.requestId;
+        if (response.responseId !== undefined) call.responseId = response.responseId;
         if (response.usage) {
           call.usage = { ...response.usage };
           report.usage.push({ ...response.usage });

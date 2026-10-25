@@ -93,6 +93,7 @@ export interface ProviderResponse {
   nativeStopReason?: string;
   usage?: TokenUsage;
   requestId?: string;
+  responseId?: string;
 }
 
 export interface ModelProvider {
@@ -139,6 +140,7 @@ interface ModelCallIdentity {
   attempt: number;
   hop: number;
   requestId?: string;
+  responseId?: string;
   usage?: TokenUsage;
   accounting: "unrecorded" | "recorded";
   trace?: TraceContext;
@@ -147,7 +149,7 @@ interface ModelCallIdentity {
 export type ModelCallRecord = ModelCallIdentity & (
   | { status: "responded"; stop?: ProviderStop; admission?: never }
   | { status: "not_started" | "rejected" | "unknown"; stop?: never; admission?: never }
-  | { status: "not_started"; admission: "denied"; accounting: "unrecorded"; requestId?: never; usage?: never; stop?: never }
+  | { status: "not_started"; admission: "denied"; accounting: "unrecorded"; requestId?: never; responseId?: never; usage?: never; stop?: never }
 );
 
 export interface ModelCallHooks {

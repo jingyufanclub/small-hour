@@ -61,6 +61,8 @@ for (const failure of [400, 408, 429, 503, "connection"] as const) {
       assert.equal(result.status, "reply");
       assert.deepEqual(result.modelCalls.map(call => [call.status, call.requestId, spend.inspect(call.callId)?.status]),
         [["rejected", "failed-request", "rejected"], ["responded", "ready-request", "accepted"]]);
+      assert.equal(result.modelCalls[1].responseId, "message-1");
+      assert.equal(spend.inspect(result.modelCalls[1].callId)?.record?.responseId, "message-1");
       assert.equal(requests.length, 2);
       assert.equal(spend.inspectBudget("app").totalAmount, 20);
     } else {

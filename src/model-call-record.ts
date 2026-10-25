@@ -6,11 +6,11 @@ const reasons: Record<ProviderStopReason, true> = {
 };
 
 export function readModelCallAdmission(call: {
-  admission?: unknown; status?: unknown; accounting?: unknown; requestId?: unknown; usage?: unknown;
+  admission?: unknown; status?: unknown; accounting?: unknown; requestId?: unknown; responseId?: unknown; usage?: unknown;
 }): "denied" | undefined {
   if (call.admission === undefined) return undefined;
   if (call.admission !== "denied" || call.status !== "not_started" || call.accounting !== "unrecorded"
-    || call.requestId !== undefined || call.usage !== undefined) throw new TypeError("Invalid model admission refusal.");
+    || call.requestId !== undefined || call.responseId !== undefined || call.usage !== undefined) throw new TypeError("Invalid model admission refusal.");
   return "denied";
 }
 

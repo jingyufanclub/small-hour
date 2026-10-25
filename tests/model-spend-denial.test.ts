@@ -57,13 +57,13 @@ test("an unpriced policy denial survives reopen with identity, scopes and eviden
   assert.ok(Number.isSafeInteger(before.createdAt)); assert.equal(before.updatedAt, before.createdAt);
   const row = first.db.prepare("SELECT * FROM model_calls WHERE call_id = ?").get(callId)!;
   assert.equal(row.reserved_amount, 0); assert.equal(row.charged_amount, 0);
-  assert.deepEqual(JSON.parse(String(row.quote_json)), selected);
-  assert.equal(String(row.context_json).includes(input.input), false);
+  assert.deepEqual(JSON.parse(String(row.budget_decision)), selected);
+  assert.equal(String(row.identity).includes(input.input), false);
   selected.reason = "changed"; selected.scopes.push("untrusted");
   first.close(); const reopened = app.open();
   assert.deepEqual(reopened.spend.inspect(callId), before);
   for (const scope of scopeIds) {
-    assert.ok(reopened.db.prepare("SELECT call_id FROM model_call_scopes WHERE call_id = ? AND scope = ?").get(callId, scope));
+    assert.ok(reopened.db.prepare("SELECT call_id FROM model_call_budgets WHERE call_id = ? AND budget_key = ?").get(callId, scope));
     assert.deepEqual(reopened.spend.inspectBudget(scope), { acceptedAmount: 0, reservedAmount: 0, unknownAmount: 0, totalAmount: 0 });
   }
 });
@@ -102,20 +102,23 @@ test("invalid and mixed policy decisions never save a denial or dispatch", async
   ]) await assert.rejects(runtime(spend, provider, policy(value as ModelSpendDecision)).turn(input), { code: "model_call_admission_failed" });
   assert.equal(calls, 0);
   assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
-  assert.equal(db.prepare("SELECT count(*) n FROM model_call_scopes").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM model_call_budgets").get()?.n, 0);
 });
 
-for (const table of ["model_calls", "model_call_scopes"]) for (const failure of ["ABORT", "IGNORE"])
+for (const table of ["model_calls", "model_call_budgets"]) for (const failure of ["ABORT", "IGNORE"])
   test(`a denial ${table} ${failure.toLowerCase()} saves no partial record and permits no dispatch`, async t => {
     const { db, spend } = fixture(t).open(); let calls = 0;
+    let injected = 0;
+    db.function("inject_denial_failure", () => { injected++; return 1; });
     db.exec(`CREATE TRIGGER fail_denial BEFORE INSERT ON ${table}
-      ${table.endsWith("_scopes") ? "WHEN NEW.scope = 'owner:authenticated:period'" : ""}
+      ${table === "model_call_budgets" ? "WHEN NEW.budget_key = 'owner:authenticated:period' AND" : "WHEN"} inject_denial_failure() = 1
       BEGIN SELECT RAISE(${failure}${failure === "ABORT" ? ", 'storage unavailable'" : ""}); END`);
     await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
       { code: "model_call_admission_failed" });
+    assert.equal(injected, 1, "the selected write reached the injected failure");
     assert.equal(calls, 0);
     assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
-    assert.equal(db.prepare("SELECT count(*) n FROM model_call_scopes").get()?.n, 0);
+    assert.equal(db.prepare("SELECT count(*) n FROM model_call_budgets").get()?.n, 0);
     db.exec("DROP TRIGGER fail_denial");
     await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
       { code: "model_call_denied" });
@@ -134,11 +137,11 @@ test("corrupt denial decisions, outcomes and memberships fail inspection without
   assert.equal(await spend.hooks(policy()).admit!(call), false);
   const before = spend.inspect(call.callId);
   const tamper = [
-    ["quote_json", JSON.stringify({ ...denial(), reason: "" })],
-    ["quote_json", JSON.stringify({ ...denial(), amount: 0, pricing: null })],
+    ["budget_decision", JSON.stringify({ ...denial(), reason: "" })],
+    ["budget_decision", JSON.stringify({ ...denial(), amount: 0, pricing: null })],
     ["reserved_amount", 1], ["charged_amount", 1], ["status", "reserved"],
-    ["record_json", JSON.stringify({ callId: call.callId, provider: call.provider, attempt: 1, hop: 0, status: "not_started", accounting: "unrecorded" })],
-    ["resolution_json", JSON.stringify({ status: "rejected", evidence: "unrelated" })],
+    ["provider_result", JSON.stringify({ callId: call.callId, provider: call.provider, attempt: 1, hop: 0, status: "not_started", accounting: "unrecorded" })],
+    ["reconciliation", JSON.stringify({ status: "rejected", evidence: "unrelated" })],
   ] as const;
   db.exec("PRAGMA ignore_check_constraints = ON");
   for (const [column, value] of tamper) {
@@ -147,8 +150,8 @@ test("corrupt denial decisions, outcomes and memberships fail inspection without
     assert.throws(() => spend.inspect(call.callId), { code: "invalid_record" });
     db.exec("ROLLBACK TO corrupt; RELEASE corrupt");
   }
-  db.prepare("UPDATE model_call_scopes SET scope = 'different' WHERE scope = ?").run(scopeIds[0]);
+  db.prepare("UPDATE model_call_budgets SET budget_key = 'different' WHERE budget_key = ?").run(scopeIds[0]);
   assert.throws(() => spend.inspect(call.callId), { code: "invalid_record" });
-  db.prepare("UPDATE model_call_scopes SET scope = ? WHERE scope = 'different'").run(scopeIds[0]);
+  db.prepare("UPDATE model_call_budgets SET budget_key = ? WHERE budget_key = 'different'").run(scopeIds[0]);
   assert.deepEqual(spend.inspect(call.callId), before);
 });

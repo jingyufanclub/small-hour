@@ -163,7 +163,7 @@ test("spending timestamps follow admission and evidence while one charge covers 
   assert.deepEqual(stamps(settled), { createdAt: 100, updatedAt: 160 });
   f.advance(200); spend.initialize(); assert.deepEqual(spend.reconcile(call.callId, decision), settled);
   assert.equal(spend.inspectBudget("account").totalAmount, 4); assert.equal(spend.inspectBudget("service").totalAmount, 4);
-  assert.deepEqual(db.prepare("SELECT MIN(created_at) createdAt, MAX(updated_at) updatedAt FROM model_call_scopes").get(),
+  assert.deepEqual(db.prepare("SELECT MIN(created_at) createdAt, MAX(updated_at) updatedAt FROM model_call_budgets").get(),
     Object.assign(Object.create(null), { createdAt: 100, updatedAt: 100 }));
 });
 

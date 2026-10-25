@@ -199,6 +199,7 @@ function preservedReport(previous: TurnReport, next: TurnReport): TurnReport {
     else {
       if (old.usage && !current.usage) current.usage = old.usage;
       if (old.requestId && !current.requestId) current.requestId = old.requestId;
+      if (old.responseId && !current.responseId) current.responseId = old.responseId;
       if (old.status === "responded" && current.status === "responded" && old.stop && !current.stop) current.stop = old.stop;
       if (old.accounting === "recorded") current.accounting = "recorded";
     }

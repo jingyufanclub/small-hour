@@ -1,6 +1,6 @@
 # Model-call records and cost
 
-[`SqliteModelCallStore`](model-spending.md) keeps one row per attempted provider call, including denied attempts. Input, output/failure, checks, usage and accounting share the call ID. Budget memberships point to that row; they carry no separate charge.
+[`SqliteModelCallStore`](model-spending.md) keeps one row per attempted provider call, including denied attempts. Model input, output/failure, checks, usage and accounting share the call ID. Budget memberships point to that row; they carry no separate charge.
 
 ## Saved evidence
 
@@ -19,13 +19,21 @@ The runtime supplies complete normalized instructions, selected memory, conversa
 
 A saved response is not proof of valid gameplay, permission or delivery. Recovery checkpoints and application records retain their respective accepted results. Obtain call IDs from execution reports or database queries; agent/turn and trace lookups are indexed. Shared trace identity does not group independent work into one transaction.
 
+## Identity and storage names
+
+`callId` identifies one runtime attempt. `requestId` identifies the provider's HTTP request when supplied; `responseId` identifies the generated message/response. Neither replaces the call ID. Providers may omit either external ID. Reports and saved provider results preserve them separately, including through checkpoint recovery.
+
+The SQL columns `model_input` and `model_output` hold captured data sent to and returned by the model. `identity` holds runtime IDs/configuration, `application` holds app metadata, `validation` holds checks, `provider_result` holds provider IDs/outcome/tokens, and `budget_decision`/`reconciliation` hold spending evidence. Structured columns contain JSON without a type suffix. `model_call_budgets(call_id, budget_key)` indexes membership; it stores no second charge.
+
+The call row's `status` and `charged_amount` own accounting. The saved provider result has no copied accounting flag. Runtime reports separately say whether their settlement callback completed; that report is execution evidence.
+
 ## Budget state
 
 | State | Exposure |
 | --- | --- |
 | `denied` | Zero; no dispatch was authorized. |
 | `reserved` | Estimated cost while dispatch/accounting is unresolved. |
-| `accepted` | Known charge, even if output validation failed. |
+| `accepted` | Calculated charge from usage and saved pricing, even if output validation failed. |
 | `rejected` | Zero with definite provider-rejection evidence. |
 | `unknown` | Estimated cost until reconciliation. |
 

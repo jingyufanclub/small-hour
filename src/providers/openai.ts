@@ -77,7 +77,7 @@ function decode(data: Record<string, unknown>, requestId?: string): ProviderResp
     else if (content.some((block) => block.type === "tool_use")) stopReason = "tool_use";
     else if (visibleMessage) stopReason = "end_turn";
   }
-  return { content, stopReason, requestId, usage: tokenUsage(data.model, usage.input_tokens, usage.output_tokens, usage.input_tokens_details) };
+  return { content, stopReason, requestId, responseId: typeof data.id === "string" && data.id.trim() ? data.id : undefined, usage: tokenUsage(data.model, usage.input_tokens, usage.output_tokens, usage.input_tokens_details) };
 }
 
 export class OpenAIProvider implements ModelProvider {

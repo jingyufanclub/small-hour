@@ -63,13 +63,16 @@ for (const exhausted of limits) test(`exhausting ${exhausted.scope} denies the c
 
 for (const failure of ["ABORT", "IGNORE"]) test(`a ${failure.toLowerCase()} on the second membership rolls back the whole admission`, async t => {
   const { spend, db } = fixture(t).open(); let calls = 0;
-  db.exec(`CREATE TRIGGER fail_membership BEFORE INSERT ON model_call_scopes
-    WHEN NEW.scope = 'account:a:month' BEGIN SELECT RAISE(${failure}${failure === "ABORT" ? ", 'unavailable'" : ""}); END`);
+  let injected = 0;
+  db.function("inject_membership_failure", () => { injected++; return 1; });
+  db.exec(`CREATE TRIGGER fail_membership BEFORE INSERT ON model_call_budgets
+    WHEN NEW.budget_key = 'account:a:month' AND inject_membership_failure() = 1 BEGIN SELECT RAISE(${failure}${failure === "ABORT" ? ", 'unavailable'" : ""}); END`);
   await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
     { code: "model_call_admission_failed" });
+  assert.equal(injected, 1, "the second membership reached the injected failure");
   assert.equal(calls, 0);
   assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
-  assert.equal(db.prepare("SELECT count(*) n FROM model_call_scopes").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM model_call_budgets").get()?.n, 0);
   for (const { scope } of limits) assert.equal(spend.inspectBudget(scope).totalAmount, 0);
 });
 
