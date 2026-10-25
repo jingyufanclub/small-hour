@@ -44,7 +44,7 @@ export async function completeModelCall(
           let admitted: boolean;
           try {
             const { signal: _, trace: __, ...body } = request;
-            admitted = await deadline.run(() => options.hooks!.admit!(callContext, structuredClone(body)));
+            admitted = await deadline.run(() => options.hooks!.admit!(callContext, body));
           }
           catch (error) {
             deadline.check();

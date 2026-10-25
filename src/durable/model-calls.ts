@@ -380,30 +380,33 @@ export class SqliteModelCallStore {
           return admitted;
         });
       },
-      record: (value: Readonly<ModelCallRecord>, context: ModelCallContext, completion?: ModelCallCompletion<unknown>) => this.transaction(() => {
-        const call = identity(context), saved = this.require(call.callId);
-        if (canonicalJson(call) !== canonicalJson(saved.context)) throw new ModelSpendError("settlement_conflict", "Accounting changed the reserved call identity.");
-        const checked = record(value, call), json = canonicalJson(checked);
+      record: (value: Readonly<ModelCallRecord>, context: ModelCallContext, completion?: ModelCallCompletion<unknown>) => {
         const hasResponse = completion !== undefined && Object.hasOwn(completion, "response");
-        const response = hasResponse ? captureContent(() => completion.response, this.capture) : checked.status === "responded" ? notRecorded : null;
-        const failure = completion?.errorCode ? { code: completion.errorCode } : null;
-        const durationMs = completion?.durationMs ?? null;
-        if (durationMs !== null && (!Number.isFinite(durationMs) || durationMs < 0)) throw new TypeError("Invalid call duration.");
-        if (failure) text(failure.code);
-        if ((hasResponse && checked.status !== "responded") || (failure && checked.status === "responded")) throw new TypeError("Completion contradicts the call outcome.");
-        if (saved.record && canonicalJson(saved.record) === json && canonicalJson(saved.response) === canonicalJson(response)
-          && canonicalJson(saved.failure) === canonicalJson(failure) && saved.durationMs === durationMs) return;
-        if (saved.status !== "reserved") throw new ModelSpendError("settlement_conflict", "This call already has a different spending outcome.");
-        let status: StoredModelCall["status"] = "unknown", charged: number | null = null;
-        if (checked.status === "responded" && checked.usage) {
-          charged = synchronous(policy.charge(checked.usage, saved.quote.pricing)); amount(charged); status = "accepted";
-        } else if (checked.status === "rejected") { status = "rejected"; charged = 0; }
-        const time = recordTime(this.now, saved.updatedAt);
-        changed(this.database.prepare(`UPDATE model_calls SET status = ?, charged_amount = ?, record_json = ?, updated_at = ?,
-          response_json = ?, failure_code = ?, duration_ms = ?, finished_at = ? WHERE call_id = ?`)
-          .run(status, charged, json, time, response === null ? null : canonicalJson(response), failure?.code ?? null, durationMs,
-            completion === undefined ? null : time, call.callId));
-      }),
+        const capturedResponse = hasResponse ? captureContent(() => completion.response, this.capture) : null;
+        return this.transaction(() => {
+          const call = identity(context), saved = this.require(call.callId);
+          if (canonicalJson(call) !== canonicalJson(saved.context)) throw new ModelSpendError("settlement_conflict", "Accounting changed the reserved call identity.");
+          const checked = record(value, call), json = canonicalJson(checked);
+          const response = hasResponse ? capturedResponse : checked.status === "responded" ? notRecorded : null;
+          const failure = completion?.errorCode ? { code: completion.errorCode } : null;
+          const durationMs = completion?.durationMs ?? null;
+          if (durationMs !== null && (!Number.isFinite(durationMs) || durationMs < 0)) throw new TypeError("Invalid call duration.");
+          if (failure) text(failure.code);
+          if ((hasResponse && checked.status !== "responded") || (failure && checked.status === "responded")) throw new TypeError("Completion contradicts the call outcome.");
+          if (saved.record && canonicalJson(saved.record) === json && canonicalJson(saved.response) === canonicalJson(response)
+            && canonicalJson(saved.failure) === canonicalJson(failure) && saved.durationMs === durationMs) return;
+          if (saved.status !== "reserved") throw new ModelSpendError("settlement_conflict", "This call already has a different spending outcome.");
+          let status: StoredModelCall["status"] = "unknown", charged: number | null = null;
+          if (checked.status === "responded" && checked.usage) {
+            charged = synchronous(policy.charge(checked.usage, saved.quote.pricing)); amount(charged); status = "accepted";
+          } else if (checked.status === "rejected") { status = "rejected"; charged = 0; }
+          const time = recordTime(this.now, saved.updatedAt);
+          changed(this.database.prepare(`UPDATE model_calls SET status = ?, charged_amount = ?, record_json = ?, updated_at = ?,
+            response_json = ?, failure_code = ?, duration_ms = ?, finished_at = ? WHERE call_id = ?`)
+            .run(status, charged, json, time, response === null ? null : canonicalJson(response), failure?.code ?? null, durationMs,
+              completion === undefined ? null : time, call.callId));
+        });
+      },
       check: (callId: string, result: ModelCallCheck) => this.recordCheck(callId, result),
     };
   }

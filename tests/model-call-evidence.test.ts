@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, type ModelProvider, type ModelCallRequest, type ProviderResponse, type TraceContent } from "../src/index.js";
+import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, ToolRegistry, type ModelProvider, type ModelCallRequest, type ProviderResponse, type TraceContent } from "../src/index.js";
 import { SqliteModelCallStore, SqliteModelStepStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
 
 const policy: ModelSpendPolicy = {
@@ -129,11 +129,18 @@ test("uncapturable provider content does not prevent a successful response from 
   for (const content of [undefined, { maxBytes: 16_384 }]) {
     const store = new SqliteModelCallStore(db, { content }); store.initialize();
     let calls = 0;
-    const result = await runtime(store, { name: "provider", model: "model-a", async complete() {
-      calls++;
-      return { ...response, content: [...response.content, { type: "opaque", value: () => "provider-only value" }] };
-    } }).turn({ ...input, turnId: content ? "uncapturable" : "disabled" });
-    assert.equal(calls, 1);
+    const runner = new SmallHourRuntime({ persona: new StaticPersonaSource("Use the read tool."), memory: new EmptyMemorySource(),
+      modelCalls: store.hooks(policy), tools: new ToolRegistry([{ name: "read", description: "Read available information",
+        inputSchema: { type: "object" }, parse: value => value, execute: () => ({ available: true }) }]),
+      provider: { name: "provider", model: "model-a", async complete() {
+        calls++;
+        return calls === 1 ? { ...response, stopReason: "tool_use", content: [
+          { type: "opaque", value: () => "provider-only value" },
+          { type: "tool_use", id: "read-1", name: "read", input: {} },
+        ] } : response;
+      } } });
+    const result = await runner.turn({ ...input, turnId: content ? "uncapturable" : "disabled", allowedTools: ["read"] });
+    assert.equal(calls, 2);
     assert.equal(result.status, "reply");
     const saved = store.inspect(result.modelCalls[0].callId)!;
     assert.equal(saved.status, "accepted");
@@ -141,6 +148,28 @@ test("uncapturable provider content does not prevent a successful response from 
     assert.deepEqual(saved.response, content
       ? { status: "unavailable", reason: "serialization_failed" }
       : { status: "omitted", reason: "disabled" });
+    assert.deepEqual(store.inspect(result.modelCalls[1].callId)!.request, saved.response);
     assert.equal(store.inspectBudget("household").reservedAmount, 0);
   }
+});
+
+
+test("serializing completion evidence leaves the shared database available to independent writers", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "small-hour-capture-")), path = join(directory, "app.sqlite");
+  const db = new DatabaseSync(path), writer = new DatabaseSync(path);
+  t.after(() => { writer.close(); db.close(); rmSync(directory, { recursive: true, force: true }); });
+  db.exec("CREATE TABLE independent_work (id INTEGER PRIMARY KEY)");
+  const store = new SqliteModelCallStore(db, { content: { maxBytes: 16_384 } }); store.initialize();
+  let couldWrite = false;
+  const hooks = store.hooks(policy);
+  const context = { ...input, callId: "capture", provider: "provider", model: "model-a", attempt: 1, hop: 0,
+    maxTokens: 100, trace: { ...input.trace, spanId: "c".repeat(16) }, signal: new AbortController().signal };
+  hooks.admit(context, { prompt: input.input });
+  hooks.record({ callId: "capture", provider: "provider", attempt: 1, hop: 0, status: "responded",
+    accounting: "unrecorded", trace: context.trace, usage }, context, { durationMs: 1, get response() {
+      try { writer.prepare("INSERT INTO independent_work DEFAULT VALUES").run(); couldWrite = true; } catch { couldWrite = false; }
+      return response;
+    } });
+  assert.equal(couldWrite, true, "capture must finish before holding the database writer lock");
+  assert.equal(store.inspect("capture")!.chargedAmount, 3);
 });
