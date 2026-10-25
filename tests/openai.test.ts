@@ -76,6 +76,7 @@ test("OpenAI sends app context and exact schema in a stateless Responses request
   assert.deepEqual(result.value, value);
   assert.equal(result.accepted, true);
   assert.equal(result.modelCalls[0].requestId, "request-1");
+  assert.equal(result.modelCalls[0].responseId, "response-1");
   assert.deepEqual(result.modelCalls[0].stop, { reason: "end_turn" });
   assert.deepEqual(result.usage[0], { model: "test-model", freshInputTokens: 20, cacheReadTokens: 10, cacheWriteTokens: 0, outputTokens: 8 });
 });

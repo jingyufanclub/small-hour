@@ -56,7 +56,7 @@ function decode(data: Record<string, unknown>, requestId?: string): ProviderResp
     else if (choice.finish_reason === "tool_calls") stopReason = "tool_use";
     else if (choice.finish_reason === "stop" && typeof message.content === "string") stopReason = "end_turn";
   }
-  return { content, stopReason, requestId, usage: tokenUsage(data.model, usage.prompt_tokens, usage.completion_tokens, usage.prompt_tokens_details) };
+  return { content, stopReason, requestId, responseId: typeof data.id === "string" && data.id.trim() ? data.id : undefined, usage: tokenUsage(data.model, usage.prompt_tokens, usage.completion_tokens, usage.prompt_tokens_details) };
 }
 
 export class OpenAICompatibleProvider implements ModelProvider {

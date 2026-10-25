@@ -18,7 +18,7 @@ erDiagram
     small_hour_tasks |o..o{ small_hour_model_steps : "model steps (logical)"
     small_hour_tasks ||..o| small_hour_deliveries : "delivery task (logical)"
     small_hour_model_steps |o..o{ model_calls : "report call IDs (logical)"
-    model_calls ||--|{ model_call_scopes : indexes
+    model_calls ||--|{ model_call_budgets : indexes
     small_hour_tasks {
         TEXT scope PK
         TEXT id PK
@@ -49,22 +49,22 @@ erDiagram
     }
     model_calls {
         TEXT call_id PK
-        TEXT context_json "agent, turn, trace, model and call configuration"
-        TEXT attributes_json "app-supplied identity and version snapshot"
-        TEXT request_json "normalized input or explicit capture omission"
-        TEXT response_json "normalized response or capture omission"
+        TEXT identity "agent, turn, trace, model and call configuration"
+        TEXT application "app-supplied identity and version snapshot"
+        TEXT model_input "normalized input or explicit capture omission"
+        TEXT model_output "normalized response or capture omission"
         TEXT failure_code "safe failure classification"
-        TEXT checks_json "named validation outcomes"
-        TEXT quote_json "quote or explicit denial"
-        TEXT record_json "provider outcome, stop and token usage"
+        TEXT validation "named validation outcomes"
+        TEXT budget_decision "quote or explicit denial"
+        TEXT provider_result "provider outcome, stop and token usage"
         INTEGER reserved_amount
         INTEGER charged_amount "null while unresolved"
         INTEGER finished_at "completion recorded, otherwise null"
         REAL duration_ms "attempt duration including admission"
     }
-    model_call_scopes {
+    model_call_budgets {
         TEXT call_id PK,FK
-        TEXT scope PK
+        TEXT budget_key PK
     }
 ```
 
@@ -74,7 +74,7 @@ Enable SQLite foreign-key checks. Memberships index one call's charge under ever
 
 ## Lifecycle timestamps
 
-All six tables have `created_at` and `updated_at`, exposed as `createdAt` and `updatedAt`: integer milliseconds since the Unix epoch. The new call and scope tables require them and provide SQL defaults. Older recovery tables allow `null` when historical time is unknown.
+All six tables have `created_at` and `updated_at`, exposed as `createdAt` and `updatedAt`: integer milliseconds since the Unix epoch. The new call and budget-membership tables require them and provide SQL defaults. Older recovery tables allow `null` when historical time is unknown.
 
 - `createdAt` records the first insertion. Recovery keeps that time.
 - `updatedAt` records a saved change, including claim renewal or stronger delivery evidence.

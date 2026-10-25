@@ -41,6 +41,7 @@ export function readReport(value: unknown): TurnReport {
     requireValue(text(call.status) && ["not_started", "responded", "rejected", "unknown"].includes(call.status));
     requireValue(text(call.accounting) && ["unrecorded", "recorded"].includes(call.accounting));
     requireValue(call.requestId === undefined || typeof call.requestId === "string");
+    requireValue(call.responseId === undefined || (call.status === "responded" && text(call.responseId)));
     if (call.usage !== undefined) usage(call.usage);
     readModelCallAdmission(call);
     readModelCallStop(call);
@@ -72,8 +73,8 @@ export function reportValue(report: TurnReport): TurnReport {
     toolCalls: report.toolCalls.map(({ errorCode, ...call }) => ({ ...call, ...(errorCode === undefined ? {} : { errorCode }) })),
     modelCalls: report.modelCalls.map(record => {
       if (record.admission === "denied") return record;
-      const { requestId, usage, ...call } = record;
-      return { ...call, ...(requestId === undefined ? {} : { requestId }), ...(usage === undefined ? {} : { usage }) };
+      const { requestId, responseId, usage, ...call } = record;
+      return { ...call, ...(requestId === undefined ? {} : { requestId }), ...(responseId === undefined ? {} : { responseId }), ...(usage === undefined ? {} : { usage }) };
     }),
     usage: report.usage,
   };

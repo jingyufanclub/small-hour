@@ -153,6 +153,7 @@ export class AnthropicProvider implements ModelProvider {
       stopReason: stopReason(message.stop_reason),
       ...(typeof message.stop_reason === "string" && message.stop_reason.trim() ? { nativeStopReason: message.stop_reason } : {}),
       requestId: message._request_id ?? undefined,
+      responseId: message.id,
       usage: tokenUsage(message),
     };
   }

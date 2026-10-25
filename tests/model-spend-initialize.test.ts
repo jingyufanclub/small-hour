@@ -44,13 +44,13 @@ test("releasing a caller savepoint leaves schema setup provisional in its outer 
 for (const enclosing of [false, true]) test(`schema failure rolls back library changes ${enclosing ? "without ending caller work" : "when initialized alone"}`, t => {
   const app = fixture(t), db = app.open(), observer = app.open();
   if (enclosing) db.exec("BEGIN");
-  db.exec(`${appSchema}; CREATE VIEW model_call_scopes AS SELECT id FROM app_settings`);
+  db.exec(`${appSchema}; CREATE VIEW model_call_budgets AS SELECT id FROM app_settings`);
   const spend = new SqliteModelCallStore(db);
   assert.throws(() => spend.initialize(), /view|table/i);
   assert.equal(db.prepare("SELECT name FROM sqlite_schema WHERE name = 'model_calls'").get(), undefined);
   assert.equal(db.prepare("SELECT id FROM app_settings").get()?.id, "initial");
   if (enclosing) assert.equal(observer.prepare("SELECT name FROM sqlite_schema LIMIT 1").get(), undefined);
-  db.exec("DROP VIEW model_call_scopes; INSERT INTO app_settings VALUES ('after-failure')");
+  db.exec("DROP VIEW model_call_budgets; INSERT INTO app_settings VALUES ('after-failure')");
   spend.initialize();
   if (enclosing) db.exec("COMMIT");
   assert.equal(observer.prepare("SELECT count(*) n FROM app_settings").get()?.n, 2);
