@@ -1,6 +1,6 @@
 import { types } from "node:util";
 import { readModelCallAdmission, readModelCallStop } from "../model-call-record.js";
-import type { ModelCallCheck, ModelCallContext, ModelCallHooks, ModelCallRecord, ModelCallRequest, TokenUsage } from "../types.js";
+import type { ModelCallCheck, ModelCallCompletion, ModelCallContext, ModelCallRecord, TokenUsage } from "../types.js";
 import { captureContent, readTraceContext, type TraceContent } from "../tracing.js";
 import { canonicalJson } from "./json.js";
 import type { SqliteDatabase } from "./sqlite.js";
@@ -31,7 +31,7 @@ export interface ModelSpendDenial {
 export type ModelSpendDecision = ModelSpendQuote | ModelSpendDenial;
 
 export interface ModelSpendPolicy {
-  quote(context: ModelCallContext, request?: Readonly<ModelCallRequest>): ModelSpendDecision;
+  quote(context: ModelCallContext, request?: unknown): ModelSpendDecision;
   charge(usage: Readonly<TokenUsage>, pricing: unknown): number;
 }
 
@@ -350,13 +350,13 @@ export class SqliteModelCallStore {
     }
   }
 
-  hooks(policy: ModelSpendPolicy): ModelCallHooks {
+  hooks(policy: ModelSpendPolicy) {
     if (typeof policy.quote !== "function" || typeof policy.charge !== "function"
       || types.isAsyncFunction(policy.quote) || types.isAsyncFunction(policy.charge)) {
       throw new ModelSpendError("invalid_request", "Spending requires synchronous quote and charge functions.");
     }
     return {
-      admit: (context, request) => {
+      admit: (context: ModelCallContext, request?: unknown) => {
         const call = identity(context);
         const captured = request === undefined ? notRecorded : captureContent(() => request, this.capture);
         return this.transaction(() => {
@@ -380,16 +380,17 @@ export class SqliteModelCallStore {
           return admitted;
         });
       },
-      record: (value, context, completion) => this.transaction(() => {
+      record: (value: Readonly<ModelCallRecord>, context: ModelCallContext, completion?: ModelCallCompletion<unknown>) => this.transaction(() => {
         const call = identity(context), saved = this.require(call.callId);
         if (canonicalJson(call) !== canonicalJson(saved.context)) throw new ModelSpendError("settlement_conflict", "Accounting changed the reserved call identity.");
         const checked = record(value, call), json = canonicalJson(checked);
-        const response = completion?.response ? captureContent(() => completion.response, this.capture) : checked.status === "responded" ? notRecorded : null;
+        const hasResponse = completion !== undefined && Object.hasOwn(completion, "response");
+        const response = hasResponse ? captureContent(() => completion.response, this.capture) : checked.status === "responded" ? notRecorded : null;
         const failure = completion?.errorCode ? { code: completion.errorCode } : null;
         const durationMs = completion?.durationMs ?? null;
         if (durationMs !== null && (!Number.isFinite(durationMs) || durationMs < 0)) throw new TypeError("Invalid call duration.");
         if (failure) text(failure.code);
-        if ((completion?.response && checked.status !== "responded") || (failure && checked.status === "responded")) throw new TypeError("Completion contradicts the call outcome.");
+        if ((hasResponse && checked.status !== "responded") || (failure && checked.status === "responded")) throw new TypeError("Completion contradicts the call outcome.");
         if (saved.record && canonicalJson(saved.record) === json && canonicalJson(saved.response) === canonicalJson(response)
           && canonicalJson(saved.failure) === canonicalJson(failure) && saved.durationMs === durationMs) return;
         if (saved.status !== "reserved") throw new ModelSpendError("settlement_conflict", "This call already has a different spending outcome.");
@@ -403,7 +404,7 @@ export class SqliteModelCallStore {
           .run(status, charged, json, time, response === null ? null : canonicalJson(response), failure?.code ?? null, durationMs,
             completion === undefined ? null : time, call.callId));
       }),
-      check: (callId, result) => this.recordCheck(callId, result),
+      check: (callId: string, result: ModelCallCheck) => this.recordCheck(callId, result),
     };
   }
 

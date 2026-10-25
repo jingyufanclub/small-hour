@@ -58,7 +58,7 @@ Recoverable tasks can opt into [admission pauses](admission-pauses.md) so budget
 - `estimateCall(context, request)` returns `{ amount, pricing }`. Use nonnegative safe integers; `pricing` is a saved JSON snapshot.
 - `chargeUsage(usage, pricing)` returns the actual charge using that snapshot and every billable token category.
 
-The runtime supplies the complete normalized request as the second argument: instructions, selected context, accumulated tool results, schemas, images and output/reasoning allowance. Manual hook callers must supply it themselves. An underestimate can exceed the allowance; the full charge is retained and constrains later calls.
+The runtime supplies the complete normalized request as the second argument: instructions, selected context, accumulated tool results, schemas, images and output/reasoning allowance. Manual hook callers may supply their provider-native request and completion; record the format in call attributes. The store captures either format without translating it. An underestimate can exceed the allowance; the full charge is retained and constrains later calls.
 
 Callbacks must cause no effects or transactions. Schema initialization can join your app's setup transaction; commit setup before execution. Admission, settlement, and reconciliation require independent transactions. Authenticate scope selection and keep scopes stable across retries.
 

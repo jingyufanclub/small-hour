@@ -157,8 +157,8 @@ export interface ModelCallHooks {
 }
 
 export type ModelCallRequest = Omit<ProviderRequest, "signal" | "trace">;
-export type ModelCallCompletion = { durationMs: number } & (
-  | { response: ProviderResponse; errorCode?: never }
+export type ModelCallCompletion<TResponse = ProviderResponse> = { durationMs: number } & (
+  | { response: TResponse; errorCode?: never }
   | { errorCode: string; response?: never }
 );
 export interface ModelCallCheck {
