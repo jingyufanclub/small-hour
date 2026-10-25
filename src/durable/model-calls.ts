@@ -407,7 +407,9 @@ export class SqliteModelCallStore {
               completion === undefined ? null : time, call.callId));
         });
       },
-      check: (callId: string, result: ModelCallCheck) => this.recordCheck(callId, result),
+      check: (callId: string, result: ModelCallCheck, accounting?: ModelCallRecord["accounting"]) => {
+        if (accounting !== "unrecorded") this.recordCheck(callId, result);
+      },
     };
   }
 

@@ -144,8 +144,8 @@ export class SmallHourRuntime {
     const recordCheck = async (name: string, verdict: "accepted" | "rejected" | "unavailable", issues: readonly string[] = []) => {
       if (!this.options.modelCalls?.check) return;
       const call = report.modelCalls.at(-1)!;
-      if (this.options.modelCalls.record && call.accounting === "unrecorded") return;
-      try { await timeout.run(() => this.options.modelCalls!.check!(call.callId, { name, verdict, issues })); }
+      try { await timeout.run(() => this.options.modelCalls!.check!(call.callId, { name, verdict, issues },
+        this.options.modelCalls!.record ? call.accounting : undefined)); }
       catch (cause) {
         timeout.check();
         throw new RuntimeError("model validation evidence could not be saved", "model_call_check_failed", { cause });

@@ -182,15 +182,20 @@ test("an application can preserve an accepted result with unsettled accounting a
   db.exec("CREATE TRIGGER reject_settlement BEFORE UPDATE ON model_calls WHEN NEW.status='accepted' BEGIN SELECT RAISE(ABORT,'settlement unavailable'); END");
   const hooks = calls.hooks(policy); let dispatched = 0;
   let accepted = true;
+  const verdicts: string[] = [];
   const runner = new SmallHourRuntime({ persona: new StaticPersonaSource("Answer."), memory: new EmptyMemorySource(),
     outputPolicy: { apply: output => ({ accepted, output: accepted ? output : "", issues: accepted ? [] : ["invalid selection"] }) },
     provider: { name: "provider", model: "model-a", async complete() { dispatched++; return response; } },
-    modelCalls: { admit: hooks.admit, check: hooks.check, record: (...args) => {
+    modelCalls: { admit: hooks.admit, check: (callId, check, accounting) => {
+      verdicts.push(check.verdict);
+      hooks.check(callId, check, accounting);
+    }, record: (...args) => {
       try { hooks.record(...args); } catch { return "unrecorded" as const; }
     } } });
   const request = { scope: "app", id: "accepted-reply", kind: "reply", version: "1", input: {} };
   const result = await steps.run(request, runner, input);
   assert.equal(result.result.status, "reply");
+  assert.deepEqual(verdicts, ["accepted"], "independent evidence sinks still receive the verdict");
   assert.equal(result.result.modelCalls[0].accounting, "unrecorded");
   assert.equal(calls.inspectBudget("household").reservedAmount, 10);
   const reopened = new SqliteModelStepStore(db);
@@ -201,6 +206,7 @@ test("an application can preserve an accepted result with unsettled accounting a
   const rejected = await runner.turn({ ...input, turnId: "invalid-selection" });
   assert.equal(rejected.status, "rejected");
   assert.equal(rejected.output, "");
+  assert.deepEqual(verdicts, ["accepted", "rejected"]);
   assert.equal(calls.inspectBudget("household").reservedAmount, 20);
 });
 
