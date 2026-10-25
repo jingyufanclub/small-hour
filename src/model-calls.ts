@@ -64,7 +64,7 @@ export async function completeModelCall(
         const record = async (completion: ModelCallCompletion) => {
           if (!options.hooks?.record) return;
           try {
-            await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, structuredClone(completion)));
+            await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, completion));
             call.accounting = "recorded";
           } catch (error) {
             deadline.check();

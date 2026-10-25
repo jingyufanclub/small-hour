@@ -123,3 +123,24 @@ test("denied calls retain the proposed input and reason without dispatch while d
   assert.ok(omitted.request.bytes > omitted.request.maxBytes);
   assert.equal(omitted.chargedAmount, 3);
 });
+
+test("uncapturable provider content does not prevent a successful response from settling its charge", async t => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  for (const content of [undefined, { maxBytes: 16_384 }]) {
+    const store = new SqliteModelCallStore(db, { content }); store.initialize();
+    let calls = 0;
+    const result = await runtime(store, { name: "provider", model: "model-a", async complete() {
+      calls++;
+      return { ...response, content: [...response.content, { type: "opaque", value: () => "provider-only value" }] };
+    } }).turn({ ...input, turnId: content ? "uncapturable" : "disabled" });
+    assert.equal(calls, 1);
+    assert.equal(result.status, "reply");
+    const saved = store.inspect(result.modelCalls[0].callId)!;
+    assert.equal(saved.status, "accepted");
+    assert.equal(saved.chargedAmount, 3);
+    assert.deepEqual(saved.response, content
+      ? { status: "unavailable", reason: "serialization_failed" }
+      : { status: "omitted", reason: "disabled" });
+    assert.equal(store.inspectBudget("household").reservedAmount, 0);
+  }
+});
