@@ -3,8 +3,7 @@ import type { SqliteDatabase } from "./sqlite.js";
 export interface RecordTimestamps { createdAt: number | null; updatedAt: number | null }
 export interface DurableClockOptions { now?: () => number }
 
-type Table = "small_hour_operation_receipts" | "small_hour_model_steps" | "model_calls"
-  | "model_call_scopes" | "small_hour_tasks" | "small_hour_deliveries";
+type Table = "small_hour_operation_receipts" | "small_hour_model_steps" | "small_hour_tasks" | "small_hour_deliveries";
 
 function timestamp(value: unknown): asserts value is number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) throw new TypeError("Record times must be nonnegative integer milliseconds.");

@@ -13,7 +13,7 @@
 - `checks`: named accepted, rejected or unavailable validation outcomes.
 - The quote or denial, provider outcome and token usage, charge/reconciliation, and lifecycle timestamps. `finishedAt` and `durationMs` remain null when completion was not recorded.
 
-Enable content with `{ content: { maxBytes } }` on the store. The default saves metadata and marks content `omitted: disabled`. Oversized content is explicitly omitted with its byte size; unsafe serialization is unavailable. Nothing is silently clipped. Legacy or manually unsupplied content is `not_recorded`. Apps choose limits and access controls appropriate to their private evidence.
+Enable content with `{ content: { maxBytes } }` on the store. The default saves metadata and marks content `omitted: disabled`. Oversized content is explicitly omitted with its byte size; unsafe serialization is unavailable. Nothing is silently clipped. Manually unsupplied content is `not_recorded`. Apps choose limits and access controls appropriate to their private evidence.
 
 The runtime supplies complete normalized instructions, selected memory, conversation, tools and schema before dispatch. The provider response and charge commit together. Runtime structured-output and final-output checks are saved automatically. Application checks can call `recordCheck(callId, { name, verdict, issues })`; names identify immutable checks. Identical repeats are safe; changed verdicts need a new check identity. A check requires a recorded response.
 

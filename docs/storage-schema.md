@@ -74,7 +74,7 @@ Enable SQLite foreign-key checks. Memberships index one call's charge under ever
 
 ## Lifecycle timestamps
 
-All six tables have nullable `created_at` and `updated_at` columns. Public records expose `createdAt` and `updatedAt`: nonnegative integer milliseconds since the Unix epoch, or `null` when historical time is unknown.
+All six tables have `created_at` and `updated_at`, exposed as `createdAt` and `updatedAt`: integer milliseconds since the Unix epoch. The new call and scope tables require them and provide SQL defaults. Older recovery tables allow `null` when historical time is unknown.
 
 - `createdAt` records the first insertion. Recovery keeps that time.
 - `updatedAt` records a saved change, including claim renewal or stronger delivery evidence.
@@ -88,4 +88,4 @@ Local receipts and enqueued tasks remain provisional until an enclosing transact
 
 See [upgrades](releases.md#0100) before opening old data. Your app owns retention; no automatic cleanup runs.
 
-`SqliteModelCallStore.initialize()` upgrades the earlier `small_hour_model_spend` and scope tables in place, retaining charges and unresolved reservations. Historical input is marked `not_recorded`. Stop old writers before upgrading; older binaries cannot use the renamed tables. Back up the database before setup. Restoring that backup requires restoring the matching application version; never discard subsequent charges during rollback.
+`SqliteModelCallStore.initialize()` creates the complete fresh schema. It refuses an existing `small_hour_model_spend` store; no automatic migration or backfill runs. Never discard retained charges or start a second allowance to bypass this refusal.

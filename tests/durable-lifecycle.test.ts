@@ -219,11 +219,12 @@ test("a backward clock cannot move stored evidence earlier or reset admission ti
 
 const legacySql = readFileSync(new URL("./fixtures/durable-legacy.sql", import.meta.url), "utf8");
 
-test("published records upgrade with unknown history and retain replay, pending work and held spending", async t => {
+test("published records upgrade with unknown history and retain replay and pending work", async t => {
   const f = fixture(t), db = f.open(); db.exec("DROP TABLE effects"); db.exec(legacySql); f.advance(1000);
   const operations = new SqliteOperationStore(db, f.clock), models = new SqliteModelStepStore(db, f.clock),
     spending = new SqliteModelCallStore(db, f.clock);
-  operations.initialize(); models.initialize(); spending.initialize();
+  operations.initialize(); models.initialize();
+  assert.throws(() => spending.initialize(), { code: "invalid_record" });
   const localRequest = { ...request, id: "local" };
   const local = operations.commit(localRequest, { execute() { assert.fail("A saved local effect must not run again"); }, parseResult: value => value });
   assert.equal(local.replayed, true); assert.equal(local.receipt.result, "saved");
@@ -241,15 +242,6 @@ test("published records upgrade with unknown history and retain replay, pending 
   const recovered = await models.recover(recoverRequest, runtime({ name: "fixture", async complete() { return response; } }), input,
     { action: "retry", checkpoint: unfinished.checkpoint, reason: "pure recovery authorized", evidence: "current-policy" });
   assert.deepEqual(stamps(recovered), { createdAt: null, updatedAt: 1000 });
-  assert.deepEqual(stamps(spending.inspect("call")), { createdAt: null, updatedAt: null });
-  assert.equal(spending.inspectBudget("account").unknownAmount, 10);
-  assert.equal(spending.inspectBudget("service").unknownAmount, 10);
-  assert.deepEqual(spending.inspect("call")!.request, { status: "unavailable", reason: "not_recorded" });
-  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='small_hour_model_spend'").get(), undefined);
-  const reconciled = spending.reconcile("call", { status: "accepted", amount: 4, evidence: "invoice-7" });
-  assert.deepEqual(stamps(reconciled), { createdAt: null, updatedAt: 1000 });
-  assert.equal(spending.inspectBudget("account").totalAmount, 4);
-  assert.equal(spending.inspectBudget("service").totalAmount, 4);
   const workflows: TaskWorkflow<DatabaseSync>[] = [
     { kind: "compose", version: "1", authorize: () => ({ status: "allow" }), steps: [
       { id: "save", kind: "local", parseResult: value => value, execute(connection) {
@@ -269,7 +261,7 @@ test("published records upgrade with unknown history and retain replay, pending 
   assert.equal((await runner.runNext())?.id, "queued-task");
   assert.deepEqual(stamps(runner.inspect({ ...request, id: "queued-task" })), { createdAt: null, updatedAt: 1000 });
   assert.equal(db.prepare("SELECT COUNT(*) n FROM effects").get()?.n, 3);
-  f.advance(1200); runner.initialize(); models.initialize(); spending.initialize();
+  f.advance(1200); runner.initialize(); models.initialize();
   assert.deepEqual(runner.inspect({ ...request, id: "completed-task" }), completed);
   assert.deepEqual(runner.inspect({ ...request, id: "delivery-task" }), delivered);
 });

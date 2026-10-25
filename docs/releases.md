@@ -12,7 +12,7 @@ Artifacts include JavaScript and TypeScript declarations. Public npm publication
 
 ## Model-call evidence
 
-Use `SqliteModelCallStore` in place of `SqliteModelSpendStore`; inspection returns `StoredModelCall`. Stop old writers and back up the database before initialization. Setup renames the spending tables to `model_calls` and `model_call_scopes`, retaining charges and held reservations. Historical content is explicitly unavailable. Existing app tables/views with either new name need resolution before setup.
+Use `SqliteModelCallStore` in place of `SqliteModelSpendStore`; inspection returns `StoredModelCall`. This store requires a fresh schema and creates `model_calls` and `model_call_scopes` directly. Existing spending tables are refused to prevent starting a second allowance. No data migration or backfill is supplied.
 
 Call-store hooks receive normalized request/completion evidence and support validation checks. Wrappers must forward the additional arguments and `check` hook. Content capture is opt-in and independent of diagnostic tracing. See the [current record contract](spending-records.md) and [schema](storage-schema.md).
 

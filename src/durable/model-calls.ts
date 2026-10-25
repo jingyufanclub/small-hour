@@ -4,7 +4,7 @@ import type { ModelCallCheck, ModelCallContext, ModelCallHooks, ModelCallRecord,
 import { captureContent, readTraceContext, type TraceContent } from "../tracing.js";
 import { canonicalJson } from "./json.js";
 import type { SqliteDatabase } from "./sqlite.js";
-import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOptions, type RecordTimestamps } from "./lifecycle.js";
+import { readTimestamps, recordTime, type DurableClockOptions, type RecordTimestamps } from "./lifecycle.js";
 
 export interface ModelSpendScope {
   scope: string;
@@ -239,7 +239,7 @@ function attributes(value: ModelCallAttributes): ModelCallAttributes {
 }
 
 function evidence(row: Record<string, unknown>): ModelCallEvidence {
-  const request = row.request_json === undefined ? notRecorded : content(JSON.parse(String(row.request_json)));
+  const request = content(JSON.parse(String(row.request_json)));
   const response = row.response_json == null ? null : content(JSON.parse(String(row.response_json)));
   const failure = row.failure_code == null ? null : { code: String(row.failure_code) };
   if (failure) text(row.failure_code);
@@ -247,31 +247,28 @@ function evidence(row: Record<string, unknown>): ModelCallEvidence {
   if (durationMs !== null && (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0)) throw new TypeError("Invalid call duration.");
   if (finishedAt !== null) amount(finishedAt);
   if ((durationMs === null) !== (finishedAt === null) || (response !== null && failure !== null)) throw new TypeError("Inconsistent call completion.");
-  const checks = row.checks_json === undefined ? {} : JSON.parse(String(row.checks_json));
+  const checks = JSON.parse(String(row.checks_json));
   if (!checks || typeof checks !== "object" || Array.isArray(checks)) throw new TypeError("Invalid call checks.");
   for (const [name, value] of Object.entries(checks)) {
     const checked = check(value as ModelCallCheck);
     if (name !== checked.name) throw new TypeError("Model check identity changed.");
   }
   return { request, response, failure, durationMs, finishedAt: finishedAt as number | null, checks,
-    attributes: row.attributes_json === undefined ? {} : attributes(JSON.parse(String(row.attributes_json))) };
+    attributes: attributes(JSON.parse(String(row.attributes_json))) };
 }
 
-function storedRecord(row: Record<string, unknown>, version: 1): QuotedStoredModelCall;
-function storedRecord(row: Record<string, unknown>, version: 3): StoredModelCall;
-function storedRecord(row: Record<string, unknown>, version: 1 | 3): StoredModelCall {
+function storedRecord(row: Record<string, unknown>): StoredModelCall {
   try {
     text(row.call_id);
-    if (row.format_version !== version) throw new TypeError("Unsupported spending record.");
+    if (row.format_version !== 3) throw new TypeError("Unsupported spending record.");
     const context = identity(JSON.parse(String(row.context_json))), offered = decision(JSON.parse(String(row.quote_json)));
     if (context.callId !== row.call_id) throw new TypeError("Spending identity changed.");
     if (offered.denied) {
-      if (version !== 3 || row.status !== "denied" || row.reserved_amount !== 0 || row.charged_amount !== 0
+      if (row.status !== "denied" || row.reserved_amount !== 0 || row.charged_amount !== 0
         || row.record_json !== null || row.resolution_json !== null) throw new TypeError("Inconsistent spending denial.");
       return { context, quote: null, denial: offered, status: "denied", chargedAmount: 0, record: null, resolution: null, ...readTimestamps(row), ...evidence(row) };
     }
-    if (offered.amount !== row.reserved_amount
-      || (version === 1 && (offered.scopes !== undefined || offered.scope !== row.scope))) throw new TypeError("Spending identity changed.");
+    if (offered.amount !== row.reserved_amount) throw new TypeError("Spending identity changed.");
     const savedRecord = row.record_json === null ? null : record(JSON.parse(String(row.record_json)), context);
     const resolved = row.resolution_json === null ? null : resolution(JSON.parse(String(row.resolution_json)));
     const status = row.status, chargedAmount = row.charged_amount;
@@ -283,7 +280,7 @@ function storedRecord(row: Record<string, unknown>, version: 1 | 3): StoredModel
       || ((status === "rejected" || status === "denied") && chargedAmount !== 0)
       || (resolved?.status === "accepted" && chargedAmount !== resolved.amount)) throw new TypeError("Inconsistent spending outcome.");
     return { context, quote: offered, status: expectedStatus, chargedAmount, record: savedRecord, resolution: resolved,
-      ...(version === 1 ? { createdAt: null, updatedAt: null } : readTimestamps(row)), ...evidence(row) } as StoredModelCall;
+      ...readTimestamps(row), ...evidence(row) } as StoredModelCall;
   } catch (cause) {
     throw new ModelSpendError("invalid_record", "The stored spending record failed validation.", { cause });
   }
@@ -307,60 +304,44 @@ export class SqliteModelCallStore {
     const db = this.database;
     db.exec("SAVEPOINT small_hour_spending_schema");
     try {
-      if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'small_hour_model_spend'").get()) {
-        if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_calls'").get()) throw new ModelSpendError("invalid_record", "Two model call stores exist; select one authority before setup.");
-        db.exec("ALTER TABLE small_hour_model_spend RENAME TO model_calls");
-        if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'small_hour_model_spend_scopes'").get()) {
-          db.exec("ALTER TABLE small_hour_model_spend_scopes RENAME TO model_call_scopes; DROP INDEX IF EXISTS small_hour_model_spend_scopes_lookup");
-        }
+      if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('small_hour_model_spend', 'small_hour_model_spend_scopes')").get()) {
+        throw new ModelSpendError("invalid_record", "The model-call store requires a fresh schema; old spending records cannot become a new allowance.");
       }
       db.exec(`CREATE TABLE IF NOT EXISTS model_calls (
-      call_id TEXT PRIMARY KEY NOT NULL,
-      context_json TEXT NOT NULL,
-      quote_json TEXT NOT NULL,
-      reserved_amount INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      charged_amount INTEGER,
-      record_json TEXT,
-      resolution_json TEXT,
-      format_version INTEGER NOT NULL,
-      CHECK (${validAmounts})
-      )`);
-      const legacy = db.prepare("SELECT name FROM pragma_table_info('model_calls') WHERE name = 'scope'").get();
-      if (!legacy && !db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_call_scopes'").get()
-        && db.prepare("SELECT call_id FROM model_calls LIMIT 1").get()) {
-        throw new ModelSpendError("invalid_record", "The spending scope index is missing.");
-      }
-      db.exec(`CREATE TABLE IF NOT EXISTS model_call_scopes (
+        call_id TEXT PRIMARY KEY NOT NULL,
+        context_json TEXT NOT NULL,
+        attributes_json TEXT NOT NULL DEFAULT '{}',
+        request_json TEXT NOT NULL,
+        response_json TEXT,
+        failure_code TEXT,
+        checks_json TEXT NOT NULL DEFAULT '{}',
+        quote_json TEXT NOT NULL,
+        reserved_amount INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        charged_amount INTEGER,
+        record_json TEXT,
+        resolution_json TEXT,
+        format_version INTEGER NOT NULL CHECK (format_version = 3),
+        duration_ms REAL CHECK (duration_ms IS NULL OR duration_ms >= 0),
+        finished_at INTEGER CHECK (finished_at IS NULL OR (typeof(finished_at) = 'integer' AND finished_at BETWEEN 0 AND 9007199254740991)),
+        created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+          CHECK (typeof(created_at) = 'integer' AND created_at BETWEEN 0 AND 9007199254740991),
+        updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+          CHECK (typeof(updated_at) = 'integer' AND updated_at BETWEEN created_at AND 9007199254740991),
+        CHECK (${validAmounts})
+      );
+      CREATE TABLE IF NOT EXISTS model_call_scopes (
         call_id TEXT NOT NULL REFERENCES model_calls(call_id) ON DELETE RESTRICT,
-        scope TEXT NOT NULL, PRIMARY KEY (call_id, scope)
-      ); CREATE INDEX IF NOT EXISTS model_call_scopes_lookup ON model_call_scopes (scope, call_id)`);
-      initializeTimestamps(db, "model_call_scopes", []);
-      if (legacy) {
-        let after: string | null = null;
-        for (;;) {
-          const row = db.prepare(`SELECT * FROM model_calls ${after === null ? "" : "WHERE call_id > ?"} ORDER BY call_id LIMIT 1`)
-            .get(...(after === null ? [] : [after])) as Record<string, unknown> | undefined;
-          if (!row) break;
-          const saved = storedRecord(row, 1);
-          this.insertScopes(saved.context.callId, scopes(saved.quote).map(value => value.scope), null);
-          changed(db.prepare("UPDATE model_calls SET format_version = 2 WHERE call_id = ?").run(saved.context.callId));
-          after = saved.context.callId;
-        }
-        db.exec("DROP INDEX IF EXISTS small_hour_model_spend_scope; DROP INDEX IF EXISTS model_calls_scope; ALTER TABLE model_calls DROP COLUMN scope");
-      }
-      initializeTimestamps(db, "model_calls", [[2, 3]]);
-      if (!db.prepare("SELECT name FROM pragma_table_info('model_calls') WHERE name = 'request_json'").get()) {
-        db.exec(`ALTER TABLE model_calls ADD COLUMN request_json TEXT NOT NULL DEFAULT '{"status":"unavailable","reason":"not_recorded"}';
-          ALTER TABLE model_calls ADD COLUMN response_json TEXT;
-          ALTER TABLE model_calls ADD COLUMN failure_code TEXT;
-          ALTER TABLE model_calls ADD COLUMN duration_ms REAL CHECK (duration_ms IS NULL OR duration_ms >= 0);
-          ALTER TABLE model_calls ADD COLUMN finished_at INTEGER CHECK (finished_at IS NULL OR (typeof(finished_at) = 'integer' AND finished_at BETWEEN 0 AND 9007199254740991));
-          ALTER TABLE model_calls ADD COLUMN checks_json TEXT NOT NULL DEFAULT '{}';
-          ALTER TABLE model_calls ADD COLUMN attributes_json TEXT NOT NULL DEFAULT '{}';`);
-      }
-      db.exec(`CREATE INDEX IF NOT EXISTS model_calls_turn ON model_calls (json_extract(context_json, '$.agentId'), json_extract(context_json, '$.turnId'));
-        CREATE INDEX IF NOT EXISTS model_calls_trace ON model_calls (json_extract(context_json, '$.trace.traceId'));`);
+        scope TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+          CHECK (typeof(created_at) = 'integer' AND created_at BETWEEN 0 AND 9007199254740991),
+        updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec') * 1000 AS INTEGER))
+          CHECK (typeof(updated_at) = 'integer' AND updated_at BETWEEN created_at AND 9007199254740991),
+        PRIMARY KEY (call_id, scope)
+      );
+      CREATE INDEX IF NOT EXISTS model_call_scopes_lookup ON model_call_scopes (scope, call_id);
+      CREATE INDEX IF NOT EXISTS model_calls_turn ON model_calls (json_extract(context_json, '$.agentId'), json_extract(context_json, '$.turnId'));
+      CREATE INDEX IF NOT EXISTS model_calls_trace ON model_calls (json_extract(context_json, '$.trace.traceId'));`);
       db.exec("RELEASE SAVEPOINT small_hour_spending_schema");
     } catch (cause) {
       try { db.exec("ROLLBACK TO SAVEPOINT small_hour_spending_schema"); db.exec("RELEASE SAVEPOINT small_hour_spending_schema"); }
@@ -444,7 +425,7 @@ export class SqliteModelCallStore {
     text(callId);
     const row = this.database.prepare("SELECT * FROM model_calls WHERE call_id = ?").get(callId) as Record<string, unknown> | undefined;
     if (row === undefined) return undefined;
-    const saved = storedRecord(row, 3), selected = saved.quote === null ? saved.denial.scopes : scopes(saved.quote).map(value => value.scope);
+    const saved = storedRecord(row), selected = saved.quote === null ? saved.denial.scopes : scopes(saved.quote).map(value => value.scope);
     const indexed = this.database.prepare(`SELECT COUNT(*) AS total,
       COALESCE(SUM(CASE WHEN scope IN (${selected.map(() => "?").join(",")}) THEN 1 ELSE 0 END), 0) AS matched
       FROM model_call_scopes WHERE call_id = ?`).get(...selected, callId) as { total: number; matched: number };
@@ -491,7 +472,7 @@ export class SqliteModelCallStore {
     return saved;
   }
 
-  private insertScopes(callId: string, selected: readonly string[], time: number | null): void {
+  private insertScopes(callId: string, selected: readonly string[], time: number): void {
     for (const scope of selected) {
       changed(this.database.prepare("INSERT INTO model_call_scopes (call_id, scope, created_at, updated_at) VALUES (?, ?, ?, ?)")
         .run(callId, scope, time, time));

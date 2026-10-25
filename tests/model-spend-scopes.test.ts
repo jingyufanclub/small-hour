@@ -133,55 +133,6 @@ test("empty, duplicate, mixed and malformed scope policies never enter the provi
   assert.equal(calls, 0);
 });
 
-function legacyDatabase(db: DatabaseSync) {
-  db.exec(`CREATE TABLE small_hour_model_spend (
-    call_id TEXT PRIMARY KEY NOT NULL, scope TEXT NOT NULL, context_json TEXT NOT NULL, quote_json TEXT NOT NULL,
-    reserved_amount INTEGER NOT NULL, status TEXT NOT NULL, charged_amount INTEGER, record_json TEXT, resolution_json TEXT,
-    format_version INTEGER NOT NULL);
-    CREATE INDEX small_hour_model_spend_scope ON small_hour_model_spend(scope)`);
-  for (const status of ["accepted", "reserved", "unknown", "rejected", "denied"]) {
-    const call = context(status), quote = { scope: limits[0].scope, limit: 30, amount: 5, pricing: { revision: "legacy" } };
-    const record = ["accepted", "unknown", "rejected"].includes(status) ? { callId: call.callId, provider: call.provider, attempt: call.attempt,
-      hop: call.hop, accounting: "unrecorded", status: status === "accepted" ? "responded" : status,
-      ...(status === "accepted" ? { usage } : {}) } : null;
-    const { input: _, signal: __, allowedTools: ___, ...identity } = call as typeof call & { allowedTools: string[] };
-    db.prepare("INSERT INTO small_hour_model_spend VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1)")
-      .run(call.callId, quote.scope, JSON.stringify(identity), JSON.stringify(quote), 5, status,
-        status === "accepted" ? 3 : ["denied", "rejected"].includes(status) ? 0 : null, record && JSON.stringify(record));
-  }
-}
-
-test("migration preserves single-scope history and blocks legacy admission while overlap includes previous charges", async t => {
-  const app = fixture(t), legacy = app.open(false); legacyDatabase(legacy.db);
-  const prior = legacy.db.prepare("SELECT context_json, quote_json, record_json FROM small_hour_model_spend WHERE call_id = 'accepted'").get();
-  legacy.spend.initialize(); legacy.spend.initialize();
-  assert.deepEqual(legacy.db.prepare("SELECT context_json, quote_json, record_json FROM model_calls WHERE call_id = 'accepted'").get(), prior);
-  assert.equal(legacy.spend.inspectBudget(limits[0].scope).totalAmount, 13);
-  const accepted = legacy.spend.inspect("accepted");
-  assert.ok(accepted?.quote);
-  assert.equal(accepted.quote.scope, limits[0].scope);
-  assert.equal(legacy.spend.inspect("unknown")?.status, "unknown");
-  assert.throws(() => legacy.db.prepare("SELECT SUM(reserved_amount) FROM model_calls WHERE scope = ?").get(limits[0].scope), /no such column/);
-  let calls = 0;
-  const provider: ModelProvider = { name: "fixture", async complete() { calls++; return response; } };
-  await assert.rejects(runtime(legacy.spend, provider, policy(limits, 1)).turn(input), { code: "model_call_denied" });
-  assert.equal(calls, 0);
-  await runtime(legacy.spend, provider, policy([{ ...limits[0], limit: 20 }, limits[1]], 7)).turn(input);
-  assert.equal(legacy.spend.inspectBudget(limits[0].scope).totalAmount, 16);
-  assert.equal(legacy.spend.inspectBudget(limits[1].scope).totalAmount, 3);
-  legacy.spend.reconcile("reserved", { status: "rejected", evidence: "provider:no-charge" });
-  legacy.close(); const reopened = app.open();
-  assert.equal(reopened.spend.inspectBudget(limits[0].scope).totalAmount, 11);
-});
-
-test("invalid legacy data aborts the entire migration without discarding earlier reservations", t => {
-  const { db, spend } = fixture(t).open(false); legacyDatabase(db);
-  db.prepare("UPDATE small_hour_model_spend SET quote_json = '{}' WHERE call_id = 'unknown'").run();
-  assert.throws(() => spend.initialize(), { code: "invalid_record" });
-  assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend WHERE format_version = 1 AND scope = ?").get(limits[0].scope)?.n, 5);
-  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'model_call_scopes'").get(), undefined);
-});
-
 for (const competition of ["shared", "account"]) test(`independent processes cannot overspend the ${competition} allowance`, { timeout: 15000 }, async t => {
   const app = fixture(t), { db, spend } = app.open(); db.exec("CREATE TABLE provider_calls (id INTEGER PRIMARY KEY)");
   const children = ["a", "b"].map(account => spawn(process.execPath,
