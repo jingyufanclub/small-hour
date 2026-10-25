@@ -2,7 +2,7 @@
 
 Tracing records the model calls, tool calls, output checks, timing, and available usage within a request. It helps answer: **what did the model receive, what did it ask to do, and where did the request fail?**
 
-Small Hour emits events. Your app sends them to its logger, database, or observability service and owns dashboards, access, and retention.
+Small Hour emits optional diagnostic events. Your app owns their sink, access and retention. For retained per-call input, output, validation and cost, use [the model call store](spending-records.md). Diagnostic export does not establish durable evidence.
 
 ## Connect your own tracing
 
@@ -37,7 +37,7 @@ flowchart TD
     turn --> check["Output check"]
 ```
 
-Pass `trace: { traceId, parentSpanId }` to `turn()` to join an existing trace. IDs are nonzero lowercase hexadecimal: 32 characters for the trace, 16 for the optional parent span. Omission creates a new trace.
+Pass `trace: { traceId, parentSpanId }` to `turn()` to join existing work. IDs are nonzero lowercase hexadecimal: 32 characters for the trace, 16 for the optional parent span. With tracing or model-call hooks enabled, omission creates a new trace. Call records retain that identity even without a diagnostic sink.
 
 Events include timestamps, sequence numbers, IDs, available usage, stop reasons, tool outcomes, and check verdicts. Finish events include elapsed time. Errors use codes rather than exception messages. Application-selected IDs can still identify people.
 
@@ -55,4 +55,4 @@ Check `result.trace` or `RuntimeError.report.trace` for export failures and omis
 
 Save and resupply trace IDs to connect workflow steps and recovery. Completed [model-step replay](model-steps.md) returns saved trace metadata without new model/tool events.
 
-Trace IDs do not replace operation IDs. Content settings do not change durable storage. Tracing observes work; required audit-before-action checks need an application enforcement boundary.
+Trace IDs do not replace operation IDs. Trace-content settings and call-store content settings are independent. Keep routine logs metadata-only; opt into detailed evidence deliberately. Required audit-before-action checks need an application enforcement boundary.

@@ -12,10 +12,22 @@ Small Hour runs a model/tool exchange inside your application. Your app decides 
 | Enforcing the tool list, invoking argument validation, and dispatching tools | Small Hour |
 | Whether this caller may read or change a specific record | Application, inside the tool |
 | Provider retries, turn limits, and execution reports | Small Hour |
-| Budget amounts, prices, and who shares a budget | Application; optional Small Hour spending store enforces reservations |
+| Budget amounts, prices, and who shares a budget | Application; optional Small Hour call store enforces reservations |
+| Attempt input, output/failure, checks, usage and charge | One Small Hour call record; application controls content capture and access |
 | Whether an answer is useful and what reaches the user | Application |
 
 One component should own each retry, effect, and charge. SDK retries are disabled so they cannot multiply the runtime's attempts. When adopting Small Hour, replace the existing retry/accounting owner for that path.
+
+```mermaid
+flowchart LR
+    Request["App request identity"] --> Step["Optional durable model step"]
+    Step --> Calls["Model calls: input, output, checks, cost"]
+    Request --> Calls
+    Calls --> Result["Accepted result or recoverable progress"]
+    Calls -. "IDs, timing, safe error codes" .-> Diagnostics["Operational diagnostics"]
+```
+
+Execution progress supports restart; call evidence supports inspection and evaluation. One request can use several calls. Shared trace IDs do not impose ordering or combine independent requests. Diagnostic export is optional and cannot substitute for required call storage.
 
 ## Check different things at different boundaries
 

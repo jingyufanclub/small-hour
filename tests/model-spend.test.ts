@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelCallContext, type ModelCallRecord, type ModelProvider } from "../src/index.js";
-import { SqliteModelSpendStore, SqliteModelStepStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, SqliteModelStepStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
 import { OpenAICompatibleProvider } from "../src/providers/openai-compatible.js";
 import { callbackGate, deadlineClock } from "./deadline-clock.js";
 
@@ -19,7 +19,7 @@ function policy(limit = 10, amount = 10, selectedScope = scope): ModelSpendPolic
   return { quote: () => ({ scope: selectedScope, limit, amount, pricing: { perToken: 1 } }),
     charge: (tokens, pricing) => (tokens.freshInputTokens + tokens.outputTokens) * (pricing as { perToken: number }).perToken };
 }
-function runtime(spend: SqliteModelSpendStore, provider: ModelProvider, options: Partial<ConstructorParameters<typeof SmallHourRuntime>[0]> = {}) {
+function runtime(spend: SqliteModelCallStore, provider: ModelProvider, options: Partial<ConstructorParameters<typeof SmallHourRuntime>[0]> = {}) {
   return new SmallHourRuntime({ persona: new StaticPersonaSource("Process supplied work."), memory: new EmptyMemorySource(),
     provider, modelCalls: spend.hooks(policy()), ...options });
 }
@@ -29,7 +29,7 @@ function fixture(t: TestContext) {
   const connections = new Set<DatabaseSync>();
   const open = () => {
     const db = new DatabaseSync(path); db.exec("PRAGMA busy_timeout = 5000"); connections.add(db);
-    const spend = new SqliteModelSpendStore(db), steps = new SqliteModelStepStore(db);
+    const spend = new SqliteModelCallStore(db), steps = new SqliteModelStepStore(db);
     spend.initialize(); steps.initialize();
     return { db, spend, steps, close: () => { db.close(); connections.delete(db); } };
   };
@@ -39,7 +39,7 @@ function fixture(t: TestContext) {
   return { ...app, path, open };
 }
 function onlyCall(db: DatabaseSync): string {
-  return String(db.prepare("SELECT call_id FROM small_hour_model_spend WHERE status <> 'denied'").get()?.call_id);
+  return String(db.prepare("SELECT call_id FROM model_calls WHERE status <> 'denied'").get()?.call_id);
 }
 
 test("concurrent jobs share one ceiling and every provider call sees its committed reservation", async t => {
@@ -108,7 +108,7 @@ test("timeout after submission survives reopen and needs explicit evidence befor
 test("failed reservation writes and an enclosing transaction cannot let a paid call escape", async t => {
   const { db, spend } = fixture(t); let calls = 0;
   const model = runtime(spend, { name: "fixture", async complete() { calls++; return response; } });
-  db.exec(`CREATE TRIGGER reject_reservation BEFORE INSERT ON small_hour_model_spend
+  db.exec(`CREATE TRIGGER reject_reservation BEFORE INSERT ON model_calls
     BEGIN SELECT RAISE(ABORT, 'reservation unavailable'); END`);
   await assert.rejects(model.turn(input), { code: "model_call_admission_failed" });
   db.exec("DROP TRIGGER reject_reservation; BEGIN");
@@ -121,7 +121,7 @@ test("failed reservation writes and an enclosing transaction cannot let a paid c
 
 test("a silently ignored reservation never authorizes a provider call", async t => {
   const { db, spend } = fixture(t); let calls = 0;
-  db.exec(`CREATE TRIGGER ignore_reservation BEFORE INSERT ON small_hour_model_spend BEGIN SELECT RAISE(IGNORE); END`);
+  db.exec(`CREATE TRIGGER ignore_reservation BEFORE INSERT ON model_calls BEGIN SELECT RAISE(IGNORE); END`);
   await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
     { code: "model_call_admission_failed" });
   assert.equal(calls, 0);
@@ -129,7 +129,7 @@ test("a silently ignored reservation never authorizes a provider call", async t 
 
 test("a silently ignored settlement cannot report success or continue executing tools", async t => {
   const { db, spend } = fixture(t); let calls = 0, effects = 0;
-  db.exec(`CREATE TRIGGER ignore_settlement BEFORE UPDATE ON small_hour_model_spend BEGIN SELECT RAISE(IGNORE); END`);
+  db.exec(`CREATE TRIGGER ignore_settlement BEFORE UPDATE ON model_calls BEGIN SELECT RAISE(IGNORE); END`);
   await assert.rejects(runtime(spend, { name: "fixture", async complete() {
     calls++; return { ...response, content: [{ type: "tool_use", id: "write-1", name: "save", input: {} }], stopReason: "tool_use" };
   } }, { tools: new ToolRegistry([{ name: "save", description: "Save", inputSchema: {}, parse: parseObject, execute() { effects++; } }]) })
@@ -144,7 +144,7 @@ test("a reservation that cannot commit starts no provider call", async t => {
   db.exec(`PRAGMA foreign_keys = ON;
     CREATE TABLE reservation_parent (id INTEGER PRIMARY KEY);
     CREATE TABLE reservation_child (parent INTEGER REFERENCES reservation_parent(id) DEFERRABLE INITIALLY DEFERRED);
-    CREATE TRIGGER defer_reservation_failure AFTER INSERT ON small_hour_model_spend
+    CREATE TRIGGER defer_reservation_failure AFTER INSERT ON model_calls
       BEGIN INSERT INTO reservation_child VALUES (1); END`);
   await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
     { code: "model_call_admission_failed" });
@@ -156,7 +156,7 @@ test("an accounting write failure stops the tool loop and preserves usage for la
   const { db, spend, steps } = fixture(t); let calls = 0, effects = 0;
   let fail = true;
   db.function("accounting_fault", () => { const rejected = fail; fail = false; return rejected ? 1 : 0; });
-  db.exec(`CREATE TRIGGER reject_accounting BEFORE UPDATE ON small_hour_model_spend
+  db.exec(`CREATE TRIGGER reject_accounting BEFORE UPDATE ON model_calls
     BEGIN SELECT CASE WHEN accounting_fault() = 1 THEN RAISE(ABORT, 'accounting unavailable') END; END`);
   const model = runtime(spend, { name: "fixture", async complete() {
     calls++; return { ...response, content: [{ type: "tool_use", id: "write-1", name: "save", input: {} }], stopReason: "tool_use" };
@@ -201,7 +201,7 @@ test("scopes remain isolated and changing a limit does not erase recorded or unc
 test("policy committed before reservation is read under the same spending transaction", async t => {
   const app = fixture(t), other = app.open(); let calls = 0, changed = false;
   app.db.exec("CREATE TABLE spending_policy (ceiling INTEGER NOT NULL); INSERT INTO spending_policy VALUES (10)");
-  const spend = new SqliteModelSpendStore({ prepare: sql => app.db.prepare(sql), exec(sql) {
+  const spend = new SqliteModelCallStore({ prepare: sql => app.db.prepare(sql), exec(sql) {
     if (sql === "BEGIN IMMEDIATE" && !changed) {
       other.db.prepare("UPDATE spending_policy SET ceiling = 0").run(); changed = true;
     }
@@ -267,7 +267,7 @@ test("the persisted price quote owns settlement and duplicate accounting cannot 
   const record: ModelCallRecord = { callId: context.callId, provider: "fixture", attempt: 1, hop: 1, status: "responded", usage,
     stop: { reason: "context_limit", nativeReason: "model_context_window_exceeded" }, accounting: "unrecorded" };
   await hooks.record!(record, context);
-  assert.doesNotMatch(String(db.prepare("SELECT context_json FROM small_hour_model_spend").get()?.context_json), /Process the selected work/);
+  assert.doesNotMatch(String(db.prepare("SELECT context_json FROM model_calls").get()?.context_json), /Process the selected work/);
   app.close();
   const recovered = app.open(), recoveredHooks = recovered.spend.hooks(p);
   assert.deepEqual(recovered.spend.inspect(context.callId)?.record?.stop, record.stop);
@@ -286,17 +286,17 @@ test("older spending records without stop evidence survive reopen without a new 
   const app = fixture(t); let calls = 0;
   const result = await runtime(app.spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input);
   const callId = result.modelCalls[0].callId;
-  const saved = JSON.parse(String(app.db.prepare("SELECT record_json FROM small_hour_model_spend WHERE call_id = ?").get(callId)?.record_json));
+  const saved = JSON.parse(String(app.db.prepare("SELECT record_json FROM model_calls WHERE call_id = ?").get(callId)?.record_json));
   assert.deepEqual(saved.stop, { reason: "end_turn" });
   delete saved.stop;
   const legacy = JSON.stringify(saved);
-  app.db.prepare("UPDATE small_hour_model_spend SET record_json = ? WHERE call_id = ?").run(legacy, callId);
+  app.db.prepare("UPDATE model_calls SET record_json = ? WHERE call_id = ?").run(legacy, callId);
   app.close();
   const recovered = app.open();
   assert.equal(recovered.spend.inspect(callId)?.record?.stop, undefined);
   assert.equal(recovered.spend.inspect(callId)?.status, "accepted");
   assert.equal(recovered.spend.inspectBudget(scope).acceptedAmount, 3);
-  assert.equal(recovered.db.prepare("SELECT record_json FROM small_hour_model_spend WHERE call_id = ?").get(callId)?.record_json, legacy);
+  assert.equal(recovered.db.prepare("SELECT record_json FROM model_calls WHERE call_id = ?").get(callId)?.record_json, legacy);
   assert.equal(calls, 1);
 });
 
@@ -325,7 +325,7 @@ test("invalid stop evidence cannot settle or disguise a corrupt spending record"
   assert.equal(priced, 0);
   await hooks.record!(record, context);
   for (const update of invalid) {
-    app.db.prepare("UPDATE small_hour_model_spend SET record_json = ? WHERE call_id = ?")
+    app.db.prepare("UPDATE model_calls SET record_json = ? WHERE call_id = ?")
       .run(JSON.stringify({ ...record, ...update }), context.callId);
     assert.throws(() => app.spend.inspect(context.callId), { code: "invalid_record" });
     assert.throws(() => hooks.record!(record, context), { code: "invalid_record" });
@@ -355,7 +355,7 @@ test("corrupt persisted amounts fail closed before the next provider attempt", a
   const provider: ModelProvider = { name: "fixture", async complete() { calls++; return response; } };
   const result = await runtime(spend, provider).turn(input);
   db.exec("PRAGMA ignore_check_constraints = ON");
-  db.prepare("UPDATE small_hour_model_spend SET charged_amount = -3").run();
+  db.prepare("UPDATE model_calls SET charged_amount = -3").run();
   assert.throws(() => spend.inspect(result.modelCalls[0].callId), { code: "invalid_record" });
   await assert.rejects(runtime(spend, provider).turn(input), { code: "model_call_admission_failed" });
   assert.equal(calls, 1);

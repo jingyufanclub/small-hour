@@ -4,8 +4,9 @@ import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOpti
 export type { DurableClockOptions, RecordTimestamps } from "./lifecycle.js";
 export { SqliteModelStepStore, ModelStepError, type ModelStepState, type ModelStepResult, type ModelStepGuard,
   type ModelRecoveryContract, type ModelStepRecoveryDecision, type ModelStepAttempt, type ModelStepOptions } from "./model-steps.js";
-export { SqliteModelSpendStore, ModelSpendError, type ModelSpendQuote, type ModelSpendPolicy,
-  type ModelSpendDenial, type ModelSpendDecision, type ModelSpendScope, type ModelSpendResolution, type ModelSpendRecord, type ModelSpendBudget } from "./model-spend.js";
+export { SqliteModelCallStore, ModelSpendError, type ModelSpendQuote, type ModelSpendPolicy,
+  type ModelSpendDenial, type ModelSpendDecision, type ModelSpendScope, type ModelSpendResolution, type StoredModelCall, type ModelSpendBudget,
+  type ModelCallEvidence, type ModelCallStoreOptions, type ModelCallAttributes } from "./model-calls.js";
 export { SqliteTaskRunner, TaskError, type TaskWorkflow, type TaskStep, type TaskContext,
   type TaskState, type TaskRunResult, type TaskStepState, type TaskStatus, type TaskPermission, type TaskSchedule, type TaskResolution, type TaskClaim, type TaskClaimRevocation } from "./tasks.js";
 

@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource,
   type ModelCallContext, type ModelCallRecord, type ModelProvider } from "../src/index.js";
-import { SqliteModelSpendStore, type ModelSpendDecision, type ModelSpendDenial, type ModelSpendPolicy } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, type ModelSpendDecision, type ModelSpendDenial, type ModelSpendPolicy } from "../src/durable/sqlite.js";
 
 const input = { agentId: "app", input: "Private input that must not enter spending records.", allowedTools: [], maxTokens: 32 };
 const scopeIds = ["app:period", "owner:authenticated:period"];
@@ -21,7 +21,7 @@ function context(callId: string): ModelCallContext {
   return { ...input, callId, turnId: "turn", provider: "fixture", model: "unpriced", attempt: 1, hop: 0,
     maxTokens: 32, signal: new AbortController().signal };
 }
-function runtime(spend: SqliteModelSpendStore, provider: ModelProvider, p = policy()) {
+function runtime(spend: SqliteModelCallStore, provider: ModelProvider, p = policy()) {
   return new SmallHourRuntime({ persona: new StaticPersonaSource("Process supplied work."), memory: new EmptyMemorySource(),
     provider, modelCalls: spend.hooks(p), retry: { attempts: 3, delayMs: () => 0 } });
 }
@@ -30,7 +30,7 @@ function fixture(t: TestContext) {
   const connections = new Set<DatabaseSync>();
   const open = () => {
     const db = new DatabaseSync(path); connections.add(db); db.exec("PRAGMA foreign_keys = ON");
-    const spend = new SqliteModelSpendStore(db); spend.initialize();
+    const spend = new SqliteModelCallStore(db); spend.initialize();
     return { db, spend, close: () => { db.close(); connections.delete(db); } };
   };
   t.after(() => { for (const db of connections) db.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -52,10 +52,10 @@ test("an unpriced policy denial survives reopen with identity, scopes and eviden
   const callId = report.modelCalls[0].callId, before = first.spend.inspect(callId);
   assert.ok(before);
   assert.deepEqual(before.context, { agentId: input.agentId, turnId: report.turnId, callId, provider: "fixture", model: "unpriced",
-    attempt: 1, hop: 1, maxTokens: 32 });
+    attempt: 1, hop: 1, maxTokens: 32, trace: report.modelCalls[0].trace });
   assert.deepEqual(before, { ...before, status: "denied", quote: null, denial: selected, chargedAmount: 0, record: null, resolution: null });
   assert.ok(Number.isSafeInteger(before.createdAt)); assert.equal(before.updatedAt, before.createdAt);
-  const row = first.db.prepare("SELECT * FROM small_hour_model_spend WHERE call_id = ?").get(callId)!;
+  const row = first.db.prepare("SELECT * FROM model_calls WHERE call_id = ?").get(callId)!;
   assert.equal(row.reserved_amount, 0); assert.equal(row.charged_amount, 0);
   assert.deepEqual(JSON.parse(String(row.quote_json)), selected);
   assert.equal(String(row.context_json).includes(input.input), false);
@@ -63,7 +63,7 @@ test("an unpriced policy denial survives reopen with identity, scopes and eviden
   first.close(); const reopened = app.open();
   assert.deepEqual(reopened.spend.inspect(callId), before);
   for (const scope of scopeIds) {
-    assert.ok(reopened.db.prepare("SELECT call_id FROM small_hour_model_spend_scopes WHERE call_id = ? AND scope = ?").get(callId, scope));
+    assert.ok(reopened.db.prepare("SELECT call_id FROM model_call_scopes WHERE call_id = ? AND scope = ?").get(callId, scope));
     assert.deepEqual(reopened.spend.inspectBudget(scope), { acceptedAmount: 0, reservedAmount: 0, unknownAmount: 0, totalAmount: 0 });
   }
 });
@@ -83,7 +83,7 @@ test("denials cannot be settled, reconciled or reused as permission when pricing
   let calls = 0;
   const result = await runtime(spend, { name: "fixture", model: "priced", async complete() { calls++; return response; } },
     { quote: () => quoted, charge: () => 3 }).turn(input);
-  assert.equal(calls, 1); assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 2);
+  assert.equal(calls, 1); assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 2);
   assert.deepEqual(spend.inspect(result.modelCalls[0].callId)?.quote, quoted);
   for (const scope of scopeIds) assert.equal(spend.inspectBudget(scope).totalAmount, 3);
 });
@@ -101,11 +101,11 @@ test("invalid and mixed policy decisions never save a denial or dispatch", async
     { ...quoted, denied: false }, { ...quoted, denied: true, reason: "unknown_model", evidence: "prices-v1" },
   ]) await assert.rejects(runtime(spend, provider, policy(value as ModelSpendDecision)).turn(input), { code: "model_call_admission_failed" });
   assert.equal(calls, 0);
-  assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 0);
-  assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend_scopes").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM model_call_scopes").get()?.n, 0);
 });
 
-for (const table of ["small_hour_model_spend", "small_hour_model_spend_scopes"]) for (const failure of ["ABORT", "IGNORE"])
+for (const table of ["model_calls", "model_call_scopes"]) for (const failure of ["ABORT", "IGNORE"])
   test(`a denial ${table} ${failure.toLowerCase()} saves no partial record and permits no dispatch`, async t => {
     const { db, spend } = fixture(t).open(); let calls = 0;
     db.exec(`CREATE TRIGGER fail_denial BEFORE INSERT ON ${table}
@@ -114,19 +114,19 @@ for (const table of ["small_hour_model_spend", "small_hour_model_spend_scopes"])
     await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
       { code: "model_call_admission_failed" });
     assert.equal(calls, 0);
-    assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 0);
-    assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend_scopes").get()?.n, 0);
+    assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
+    assert.equal(db.prepare("SELECT count(*) n FROM model_call_scopes").get()?.n, 0);
     db.exec("DROP TRIGGER fail_denial");
     await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
       { code: "model_call_denied" });
-    assert.equal(calls, 0); assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 1);
+    assert.equal(calls, 0); assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 1);
   });
 
 test("a policy exception is an admission failure without a fabricated denial", async t => {
   const { db, spend } = fixture(t).open(); let calls = 0;
   await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } },
     { quote: () => { throw new Error("rate card unavailable"); }, charge: () => 0 }).turn(input), { code: "model_call_admission_failed" });
-  assert.equal(calls, 0); assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 0);
+  assert.equal(calls, 0); assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
 });
 
 test("corrupt denial decisions, outcomes and memberships fail inspection without being repaired", async t => {
@@ -143,12 +143,12 @@ test("corrupt denial decisions, outcomes and memberships fail inspection without
   db.exec("PRAGMA ignore_check_constraints = ON");
   for (const [column, value] of tamper) {
     db.exec("SAVEPOINT corrupt");
-    db.prepare(`UPDATE small_hour_model_spend SET ${column} = ? WHERE call_id = ?`).run(value, call.callId);
+    db.prepare(`UPDATE model_calls SET ${column} = ? WHERE call_id = ?`).run(value, call.callId);
     assert.throws(() => spend.inspect(call.callId), { code: "invalid_record" });
     db.exec("ROLLBACK TO corrupt; RELEASE corrupt");
   }
-  db.prepare("UPDATE small_hour_model_spend_scopes SET scope = 'different' WHERE scope = ?").run(scopeIds[0]);
+  db.prepare("UPDATE model_call_scopes SET scope = 'different' WHERE scope = ?").run(scopeIds[0]);
   assert.throws(() => spend.inspect(call.callId), { code: "invalid_record" });
-  db.prepare("UPDATE small_hour_model_spend_scopes SET scope = ? WHERE scope = 'different'").run(scopeIds[0]);
+  db.prepare("UPDATE model_call_scopes SET scope = ? WHERE scope = 'different'").run(scopeIds[0]);
   assert.deepEqual(spend.inspect(call.callId), before);
 });

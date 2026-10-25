@@ -1,6 +1,6 @@
 # Set a money budget
 
-A token limit controls response size. A money budget controls spending across requests. `SqliteModelSpendStore` checks each attempt against your allowances before dispatch.
+A token limit controls response size. A money budget controls spending across requests. `SqliteModelCallStore` checks each attempt against your allowances before dispatch.
 
 **Your app supplies prices and conservative cost estimates.** Small Hour has no built-in price list or estimator.
 
@@ -9,16 +9,18 @@ A token limit controls response size. A money budget controls spending across re
 This extends the [quickstart's runtime options](../README.md#install-and-try). Supply a synchronous SQLite `database`, a stable `serviceBudgetScope` for your budget period, and synchronous `estimateCall` / `chargeUsage` functions:
 
 ```ts
-import { SqliteModelSpendStore } from "small-hour/durable/sqlite";
+import { SqliteModelCallStore } from "small-hour/durable/sqlite";
 
-const spending = new SqliteModelSpendStore(database);
+const spending = new SqliteModelCallStore(database, {
+  content: { maxBytes: captureLimitBytes },
+});
 spending.initialize();
 
 const budgetedRuntime = new SmallHourRuntime({
   ...options,
   modelCalls: spending.hooks({
-    quote: context => ({
-      ...estimateCall(context),
+    quote: (context, request) => ({
+      ...estimateCall(context, request),
       scopes: [
         { scope: `turn:${context.turnId}`, limit: 100_000 },
         { scope: serviceBudgetScope, limit: 20_000_000 },
@@ -29,7 +31,7 @@ const budgetedRuntime = new SmallHourRuntime({
 });
 ```
 
-Here amounts are integer microdollars: $0.10 per turn and $20 for the shared period. Pick your own limits and units. Use `budgetedRuntime.turn()` and preserve its `turnId` when continuing the same work.
+Here amounts are integer microdollars: $0.10 per turn and $20 for the shared period. Supply your capture byte limit, or omit `content` for metadata only. Pick your own limits and units. Preserve `turnId` when continuing the same work.
 
 A **scope** identifies a shared allowance. One call must fit every selected scope; its charge counts once in each.
 
@@ -53,10 +55,10 @@ Recoverable tasks can opt into [admission pauses](admission-pauses.md) so budget
 
 ## Your pricing functions
 
-- `estimateCall(context)` returns `{ amount, pricing }`. Use nonnegative safe integers; `pricing` is a saved JSON snapshot.
+- `estimateCall(context, request)` returns `{ amount, pricing }`. Use nonnegative safe integers; `pricing` is a saved JSON snapshot.
 - `chargeUsage(usage, pricing)` returns the actual charge using that snapshot and every billable token category.
 
-Estimate the complete request: input, selected context, accumulated tool results, images, and output/reasoning allowance. **The hook's explicit input does not include selected memory or accumulated tool results.** Your estimator must account for them separately. An underestimate can exceed the allowance; the full charge is retained and constrains later calls.
+The runtime supplies the complete normalized request as the second argument: instructions, selected context, accumulated tool results, schemas, images and output/reasoning allowance. Manual hook callers may supply their provider-native request and completion; record the format in call attributes. The store captures either format without translating it. An underestimate can exceed the allowance; the full charge is retained and constrains later calls.
 
 Callbacks must cause no effects or transactions. Schema initialization can join your app's setup transaction; commit setup before execution. Admission, settlement, and reconciliation require independent transactions. Authenticate scope selection and keep scopes stable across retries.
 

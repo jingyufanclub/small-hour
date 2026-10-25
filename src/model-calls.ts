@@ -4,7 +4,7 @@ import { readModelCallStop } from "./model-call-record.js";
 import { withRetry, type RetryPolicy } from "./retry.js";
 import type { TurnTrace } from "./tracing.js";
 import { RuntimeError, type ModelCallContext, type ModelCallHooks, type ModelCallRecord,
-  type ModelProvider, type ProviderRequest, type ProviderResponse, type TurnContext, type TurnReport } from "./types.js";
+  type ModelCallCompletion, type ModelProvider, type ProviderRequest, type ProviderResponse, type TurnContext, type TurnReport } from "./types.js";
 
 class ProviderFailure extends Error {}
 
@@ -21,7 +21,7 @@ export async function completeModelCall(
     return await withRetry(async () => {
       deadline.check();
       if (report.modelCalls.length >= options.maxModelCalls) throw new RuntimeError("model call limit reached", "model_call_limit");
-      const trace = options.trace, span = trace?.child();
+      const trace = options.trace, span = trace?.child(), startedAt = performance.now();
       const callContext: ModelCallContext = {
         ...context, callId: randomUUID(), provider: provider.name, model: provider.model,
         attempt: report.modelCalls.length + 1, hop: report.hops,
@@ -42,7 +42,10 @@ export async function completeModelCall(
         await options.checkpoint?.();
         if (options.hooks?.admit) {
           let admitted: boolean;
-          try { admitted = await deadline.run(() => options.hooks!.admit!(callContext)); }
+          try {
+            const { signal: _, trace: __, ...body } = request;
+            admitted = await deadline.run(() => options.hooks!.admit!(callContext, body));
+          }
           catch (error) {
             deadline.check();
             throw new RuntimeError("model admission failed", "model_call_admission_failed", { cause: error });
@@ -58,10 +61,10 @@ export async function completeModelCall(
           }
         }
 
-        const record = async () => {
+        const record = async (completion: ModelCallCompletion) => {
           if (!options.hooks?.record) return;
           try {
-            await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext));
+            await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, completion));
             call.accounting = "recorded";
           } catch (error) {
             deadline.check();
@@ -93,7 +96,7 @@ export async function completeModelCall(
           call.status = info?.status ?? "unknown";
           call.requestId = info?.requestId;
           await options.checkpoint?.();
-          await record();
+          await record({ errorCode: "provider_failed", durationMs: Math.max(0, performance.now() - startedAt) });
           if (options.hooks?.record) await options.checkpoint?.();
           throw new ProviderFailure("provider failed", { cause: error });
         }
@@ -111,7 +114,7 @@ export async function completeModelCall(
             ...(response.nativeStopReason === undefined ? {} : { nativeReason: response.nativeStopReason }) } });
         } catch (cause) { invalidStop = cause; }
         await options.checkpoint?.();
-        await record();
+        await record({ response, durationMs: Math.max(0, performance.now() - startedAt) });
         if (options.hooks?.record) await options.checkpoint?.();
         if (invalidStop) throw new RuntimeError("provider returned invalid stop evidence", "invalid_provider_stop", { cause: invalidStop });
         return response;
