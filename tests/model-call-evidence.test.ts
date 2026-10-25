@@ -173,3 +173,26 @@ test("serializing completion evidence leaves the shared database available to in
   assert.equal(couldWrite, true, "capture must finish before holding the database writer lock");
   assert.equal(store.inspect("capture")!.chargedAmount, 3);
 });
+
+
+test("an application can preserve an accepted result with unsettled accounting and replay it without another call", async t => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const calls = new SqliteModelCallStore(db, { content: { maxBytes: 16_384 } }), steps = new SqliteModelStepStore(db);
+  calls.initialize(); steps.initialize();
+  db.exec("CREATE TRIGGER reject_settlement BEFORE UPDATE ON model_calls WHEN NEW.status='accepted' BEGIN SELECT RAISE(ABORT,'settlement unavailable'); END");
+  const hooks = calls.hooks(policy); let dispatched = 0;
+  const runner = new SmallHourRuntime({ persona: new StaticPersonaSource("Answer."), memory: new EmptyMemorySource(),
+    provider: { name: "provider", model: "model-a", async complete() { dispatched++; return response; } },
+    modelCalls: { admit: hooks.admit, record: (...args) => {
+      try { hooks.record(...args); } catch { return "unrecorded" as const; }
+    } } });
+  const request = { scope: "app", id: "accepted-reply", kind: "reply", version: "1", input: {} };
+  const result = await steps.run(request, runner, input);
+  assert.equal(result.result.status, "reply");
+  assert.equal(result.result.modelCalls[0].accounting, "unrecorded");
+  assert.equal(calls.inspectBudget("household").reservedAmount, 10);
+  const reopened = new SqliteModelStepStore(db);
+  const replay = await reopened.run(request, runner, input);
+  assert.equal(replay.replayed, true); assert.equal(dispatched, 1);
+  assert.deepEqual(replay.result, result.result);
+});

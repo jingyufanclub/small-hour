@@ -67,3 +67,5 @@ Callbacks must cause no effects or transactions. Schema initialization can join 
 `inspectBudget(scope)` reports charged, reserved, unknown, and total amounts. `inspect(callId)` shows the saved quote, outcome, and evidence. Do not sum overlapping scopes as total spending.
 
 `reconcile(callId, outcome)` resolves reserved/unknown calls using verified evidence. Output refusal can still cost money. Timeout or cancellation alone cannot establish whether a call was charged; keep uncertain amounts reserved until your app verifies the outcome. See [spending records](spending-records.md) for settlement rules. Completed model-step replay adds no charge.
+
+The default store hook throws on settlement failure. An application that can safely continue with the provider result may catch that error in its `record` hook and return `"unrecorded"`. The runtime preserves that accounting status while applying normal output/tool checks. Keep the reservation, report the unresolved accounting and reconcile it from evidence; returning this status does not retry or release spending.

@@ -152,7 +152,7 @@ export type ModelCallRecord = ModelCallIdentity & (
 
 export interface ModelCallHooks {
   admit?(context: ModelCallContext, request?: ModelCallRequest): boolean | Promise<boolean>;
-  record?(call: Readonly<ModelCallRecord>, context: ModelCallContext, completion?: ModelCallCompletion): void | Promise<void>;
+  record?(call: Readonly<ModelCallRecord>, context: ModelCallContext, completion?: ModelCallCompletion): void | "unrecorded" | Promise<void | "unrecorded">;
   check?(callId: string, result: ModelCallCheck): void | Promise<void>;
 }
 

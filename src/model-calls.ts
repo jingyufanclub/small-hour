@@ -64,8 +64,8 @@ export async function completeModelCall(
         const record = async (completion: ModelCallCompletion) => {
           if (!options.hooks?.record) return;
           try {
-            await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, completion));
-            call.accounting = "recorded";
+            const outcome = await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, completion));
+            if (outcome !== "unrecorded") call.accounting = "recorded";
           } catch (error) {
             deadline.check();
             throw new RuntimeError("model accounting failed", "model_call_accounting_failed", { cause: error });
