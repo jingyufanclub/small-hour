@@ -64,8 +64,8 @@ export async function completeModelCall(
         const record = async (completion: ModelCallCompletion) => {
           if (!options.hooks?.record) return;
           try {
-            await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, completion));
-            call.accounting = "recorded";
+            const outcome = await deadline.run(() => options.hooks!.record!(structuredClone(call), callContext, completion));
+            if (outcome !== "unrecorded") call.accounting = "recorded";
           } catch (error) {
             deadline.check();
             throw new RuntimeError("model accounting failed", "model_call_accounting_failed", { cause: error });
@@ -97,7 +97,10 @@ export async function completeModelCall(
           call.requestId = info?.requestId;
           await options.checkpoint?.();
           await record({ errorCode: "provider_failed", durationMs: Math.max(0, performance.now() - startedAt) });
-          if (options.hooks?.record) await options.checkpoint?.();
+          if (options.hooks?.record) {
+            await options.checkpoint?.();
+            if (call.accounting === "unrecorded") throw new RuntimeError("failed model call accounting remains unsettled", "model_call_accounting_failed", { cause: error });
+          }
           throw new ProviderFailure("provider failed", { cause: error });
         }
         if (span) trace?.emit(span, { type: "model.response", format: "runtime" }, () => response);

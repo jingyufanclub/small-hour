@@ -173,3 +173,61 @@ test("serializing completion evidence leaves the shared database available to in
   assert.equal(couldWrite, true, "capture must finish before holding the database writer lock");
   assert.equal(store.inspect("capture")!.chargedAmount, 3);
 });
+
+
+test("an application can preserve an accepted result with unsettled accounting and replay it without another call", async t => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const calls = new SqliteModelCallStore(db, { content: { maxBytes: 16_384 } }), steps = new SqliteModelStepStore(db);
+  calls.initialize(); steps.initialize();
+  db.exec("CREATE TRIGGER reject_settlement BEFORE UPDATE ON model_calls WHEN NEW.status='accepted' BEGIN SELECT RAISE(ABORT,'settlement unavailable'); END");
+  const hooks = calls.hooks(policy); let dispatched = 0;
+  let accepted = true;
+  const verdicts: string[] = [];
+  const runner = new SmallHourRuntime({ persona: new StaticPersonaSource("Answer."), memory: new EmptyMemorySource(),
+    outputPolicy: { apply: output => ({ accepted, output: accepted ? output : "", issues: accepted ? [] : ["invalid selection"] }) },
+    provider: { name: "provider", model: "model-a", async complete() { dispatched++; return response; } },
+    modelCalls: { admit: hooks.admit, check: (callId, check, accounting) => {
+      verdicts.push(check.verdict);
+      hooks.check(callId, check, accounting);
+    }, record: (...args) => {
+      try { hooks.record(...args); } catch { return "unrecorded" as const; }
+    } } });
+  const request = { scope: "app", id: "accepted-reply", kind: "reply", version: "1", input: {} };
+  const result = await steps.run(request, runner, input);
+  assert.equal(result.result.status, "reply");
+  assert.deepEqual(verdicts, ["accepted"], "independent evidence sinks still receive the verdict");
+  assert.equal(result.result.modelCalls[0].accounting, "unrecorded");
+  assert.equal(calls.inspectBudget("household").reservedAmount, 10);
+  const reopened = new SqliteModelStepStore(db);
+  const replay = await reopened.run(request, runner, input);
+  assert.equal(replay.replayed, true); assert.equal(dispatched, 1);
+  assert.deepEqual(replay.result, result.result);
+  accepted = false;
+  const rejected = await runner.turn({ ...input, turnId: "invalid-selection" });
+  assert.equal(rejected.status, "rejected");
+  assert.equal(rejected.output, "");
+  assert.deepEqual(verdicts, ["accepted", "rejected"]);
+  assert.equal(calls.inspectBudget("household").reservedAmount, 20);
+});
+
+
+test("unsettled failed calls stop automatic retries and keep their held allowance", async t => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const calls = new SqliteModelCallStore(db, { content: { maxBytes: 16_384 } }); calls.initialize();
+  db.exec("CREATE TRIGGER reject_settlement BEFORE UPDATE ON model_calls WHEN NEW.status='unknown' BEGIN SELECT RAISE(ABORT,'settlement unavailable'); END");
+  const hooks = calls.hooks(policy); let dispatched = 0;
+  const runner = new SmallHourRuntime({ persona: new StaticPersonaSource("Answer."), memory: new EmptyMemorySource(),
+    provider: { name: "provider", model: "model-a", isRetryable: () => true,
+      async complete() { dispatched++; throw new Error("connection interrupted"); } },
+    retry: { attempts: 3, delayMs: () => 0 },
+    modelCalls: { admit: hooks.admit, check: hooks.check, record: (...args) => {
+      try { hooks.record(...args); } catch { return "unrecorded" as const; }
+    } } });
+  await assert.rejects(runner.turn(input), (error: any) => {
+    assert.equal(dispatched, 1, "a host must reconcile the unsettled failure before another paid attempt");
+    assert.equal(error.code, "model_call_accounting_failed");
+    assert.equal(error.report.modelCalls[0].accounting, "unrecorded");
+    return true;
+  });
+  assert.equal(calls.inspectBudget("household").reservedAmount, 10);
+});
