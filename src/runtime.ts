@@ -119,7 +119,8 @@ export class SmallHourRuntime {
     const traceInput = input.trace === undefined ? undefined : readTraceInput(input.trace);
     const timeout = turnDeadline(input.signal, this.timeoutMs);
     const context: TurnContext = { agentId: input.agentId, turnId: input.turnId ?? randomUUID(), input: input.input, signal: timeout.signal };
-    const trace = this.tracing ? new TurnTrace(this.tracing, { agentId: context.agentId, turnId: context.turnId }, traceInput) : undefined;
+    const trace = this.tracing || this.options.modelCalls || traceInput
+      ? new TurnTrace(this.tracing, { agentId: context.agentId, turnId: context.turnId }, traceInput) : undefined;
     if (trace) context.trace = trace.root.context;
     const report: TurnReport<TChoice> = { agentId: context.agentId, turnId: context.turnId, toolCalls: [], modelCalls: [], usage: [], hops: 0 };
     const toolSpans = new Map<string, TraceSpan>();
@@ -140,6 +141,15 @@ export class SmallHourRuntime {
       return { ...result, trace: trace.summary() };
     };
     const { signal } = context;
+    const recordCheck = async (name: string, verdict: "accepted" | "rejected" | "unavailable", issues: readonly string[] = []) => {
+      if (!this.options.modelCalls?.check) return;
+      const call = report.modelCalls.at(-1)!;
+      try { await timeout.run(() => this.options.modelCalls!.check!(call.callId, { name, verdict, issues })); }
+      catch (cause) {
+        timeout.check();
+        throw new RuntimeError("model validation evidence could not be saved", "model_call_check_failed", { cause });
+      }
+    };
     const checkpoint = async () => {
       updateTrace();
       if (!observer) return;
@@ -233,8 +243,10 @@ export class SmallHourRuntime {
             catch (error) {
               if (span) trace?.emit(span, { type: "check.finished", check: "structured_output", verdict: signal.aborted ? "unavailable" : "rejected", durationMs: trace.duration(span) });
               timeout.check();
+              await recordCheck("structured_output", "rejected", ["structured_output_invalid"]);
               throw new RuntimeError("structured output failed validation", "structured_output_invalid", { cause: error });
             }
+            await recordCheck("structured_output", "accepted");
             return finish({ ...snapshot(report), choice: undefined, status: "structured", value, output: said, accepted: true, issues: [], finishReason: response.stopReason });
           }
           if (input.choice && (input.choice.required ?? true) && report.choice === undefined) throw new RuntimeError(`turn ended without required choice ${choiceName}`, "choice_required");
@@ -247,8 +259,10 @@ export class SmallHourRuntime {
             if (span) trace?.emit(span, { type: "check.finished", check: "output", verdict: policy.accepted ? "accepted" : "rejected", durationMs: trace.duration(span) }, () => policy);
           } catch (error) {
             if (span) trace?.emit(span, { type: "check.finished", check: "output", verdict: "unavailable", durationMs: trace.duration(span) });
+            if (!signal.aborted) await recordCheck("output", "unavailable", ["output_policy_failed"]);
             throw error;
           }
+          await recordCheck("output", policy.accepted ? "accepted" : "rejected", policy.issues ?? []);
           return finish({
             ...snapshot(report), status: policy.accepted ? (policy.output ? "reply" : "silence") : "rejected",
             output: policy.output, accepted: policy.accepted, issues: policy.issues ?? [], finishReason: response.stopReason,

@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, type ModelCallContext, type ModelProvider } from "../src/index.js";
-import { SqliteModelSpendStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, type ModelSpendPolicy } from "../src/durable/sqlite.js";
 
 const input = { agentId: "app", input: "Process selected work.", allowedTools: [] };
 const usage = { model: "fixture", freshInputTokens: 2, cacheWriteTokens: 0, cacheReadTokens: 0, outputTokens: 1 };
@@ -17,7 +17,7 @@ const limits = [{ scope: "app:month", limit: 10 }, { scope: "account:a:month", l
 function policy(scopes = limits, amount = 10): ModelSpendPolicy {
   return { quote: () => ({ scopes, amount, pricing: { revision: "1" } }), charge: () => 3 };
 }
-function runtime(spend: SqliteModelSpendStore, provider: ModelProvider, p = policy(), attempts = 1) {
+function runtime(spend: SqliteModelCallStore, provider: ModelProvider, p = policy(), attempts = 1) {
   return new SmallHourRuntime({ persona: new StaticPersonaSource("Process supplied work."), memory: new EmptyMemorySource(),
     provider, modelCalls: spend.hooks(p), retry: { attempts, delayMs: () => 0 } });
 }
@@ -26,7 +26,7 @@ function fixture(t: TestContext) {
   const connections = new Set<DatabaseSync>();
   const open = (initialize = true) => {
     const db = new DatabaseSync(path); connections.add(db); db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON");
-    const spend = new SqliteModelSpendStore(db); if (initialize) spend.initialize();
+    const spend = new SqliteModelCallStore(db); if (initialize) spend.initialize();
     return { db, spend, close: () => { db.close(); connections.delete(db); } };
   };
   t.after(() => { for (const db of connections) db.close(); rmSync(directory, { recursive: true, force: true }); });
@@ -41,13 +41,13 @@ test("a provider sees one committed reservation in every applicable budget and o
   const result = await runtime(first.spend, { name: "fixture", async complete() {
     calls++;
     for (const { scope } of limits) assert.equal(observer.spend.inspectBudget(scope).reservedAmount, 10);
-    assert.equal(observer.db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 1);
+    assert.equal(observer.db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 1);
     return response;
   } }).turn(input);
   assert.equal(calls, 1);
   assert.deepEqual(observer.spend.inspect(result.modelCalls[0].callId)?.quote, policy().quote(context("unused")));
   for (const { scope } of limits) assert.equal(observer.spend.inspectBudget(scope).acceptedAmount, 3);
-  assert.equal(observer.db.prepare("SELECT sum(charged_amount) n FROM small_hour_model_spend").get()?.n, 3);
+  assert.equal(observer.db.prepare("SELECT sum(charged_amount) n FROM model_calls").get()?.n, 3);
 });
 
 for (const exhausted of limits) test(`exhausting ${exhausted.scope} denies the call without holding the other allowance`, async t => {
@@ -57,19 +57,19 @@ for (const exhausted of limits) test(`exhausting ${exhausted.scope} denies the c
   await assert.rejects(runtime(spend, provider).turn(input), { code: "model_call_denied" });
   assert.equal(calls, 1);
   for (const { scope } of limits) assert.equal(spend.inspectBudget(scope).totalAmount, scope === exhausted.scope ? 10 : 0);
-  const denied = String(db.prepare("SELECT call_id FROM small_hour_model_spend WHERE call_id <> ?").get(first.modelCalls[0].callId)?.call_id);
+  const denied = String(db.prepare("SELECT call_id FROM model_calls WHERE call_id <> ?").get(first.modelCalls[0].callId)?.call_id);
   assert.equal(spend.inspect(denied)?.status, "denied");
 });
 
 for (const failure of ["ABORT", "IGNORE"]) test(`a ${failure.toLowerCase()} on the second membership rolls back the whole admission`, async t => {
   const { spend, db } = fixture(t).open(); let calls = 0;
-  db.exec(`CREATE TRIGGER fail_membership BEFORE INSERT ON small_hour_model_spend_scopes
+  db.exec(`CREATE TRIGGER fail_membership BEFORE INSERT ON model_call_scopes
     WHEN NEW.scope = 'account:a:month' BEGIN SELECT RAISE(${failure}${failure === "ABORT" ? ", 'unavailable'" : ""}); END`);
   await assert.rejects(runtime(spend, { name: "fixture", async complete() { calls++; return response; } }).turn(input),
     { code: "model_call_admission_failed" });
   assert.equal(calls, 0);
-  assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 0);
-  assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend_scopes").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
+  assert.equal(db.prepare("SELECT count(*) n FROM model_call_scopes").get()?.n, 0);
   for (const { scope } of limits) assert.equal(spend.inspectBudget(scope).totalAmount, 0);
 });
 
@@ -155,13 +155,13 @@ test("migration preserves single-scope history and blocks legacy admission while
   const app = fixture(t), legacy = app.open(false); legacyDatabase(legacy.db);
   const prior = legacy.db.prepare("SELECT context_json, quote_json, record_json FROM small_hour_model_spend WHERE call_id = 'accepted'").get();
   legacy.spend.initialize(); legacy.spend.initialize();
-  assert.deepEqual(legacy.db.prepare("SELECT context_json, quote_json, record_json FROM small_hour_model_spend WHERE call_id = 'accepted'").get(), prior);
+  assert.deepEqual(legacy.db.prepare("SELECT context_json, quote_json, record_json FROM model_calls WHERE call_id = 'accepted'").get(), prior);
   assert.equal(legacy.spend.inspectBudget(limits[0].scope).totalAmount, 13);
   const accepted = legacy.spend.inspect("accepted");
   assert.ok(accepted?.quote);
   assert.equal(accepted.quote.scope, limits[0].scope);
   assert.equal(legacy.spend.inspect("unknown")?.status, "unknown");
-  assert.throws(() => legacy.db.prepare("SELECT SUM(reserved_amount) FROM small_hour_model_spend WHERE scope = ?").get(limits[0].scope), /no such column/);
+  assert.throws(() => legacy.db.prepare("SELECT SUM(reserved_amount) FROM model_calls WHERE scope = ?").get(limits[0].scope), /no such column/);
   let calls = 0;
   const provider: ModelProvider = { name: "fixture", async complete() { calls++; return response; } };
   await assert.rejects(runtime(legacy.spend, provider, policy(limits, 1)).turn(input), { code: "model_call_denied" });
@@ -179,7 +179,7 @@ test("invalid legacy data aborts the entire migration without discarding earlier
   db.prepare("UPDATE small_hour_model_spend SET quote_json = '{}' WHERE call_id = 'unknown'").run();
   assert.throws(() => spend.initialize(), { code: "invalid_record" });
   assert.equal(db.prepare("SELECT count(*) n FROM small_hour_model_spend WHERE format_version = 1 AND scope = ?").get(limits[0].scope)?.n, 5);
-  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'small_hour_model_spend_scopes'").get(), undefined);
+  assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE name = 'model_call_scopes'").get(), undefined);
 });
 
 for (const competition of ["shared", "account"]) test(`independent processes cannot overspend the ${competition} allowance`, { timeout: 15000 }, async t => {

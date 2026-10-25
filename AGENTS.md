@@ -10,6 +10,7 @@ Keep ownership explicit:
 - New durable state, workers, recovery policies, and adapters require a selected, bounded Linear contract. Give each effect and retry one authority; SDK retries stay disabled. Preserve accepted IDs and results through recovery.
 - Never add unrestricted shell, filesystem, browser, channel, or credential access, autonomous task creation, model-authored workflows, or self-written skills.
 - Never add a growing transcript store. Memory is supplied fresh by the host on every turn.
+- Keep one call record for each attempt's supplied context, response/failure, checks, usage and accounting. Recovery checkpoints retain execution progress and accepted results; routine diagnostics reference call identities. Shared trace IDs do not coordinate requests. Content capture is explicit, app-controlled, and separate from routine diagnostic retention.
 - Tool implementations are application-owned. Local transaction callbacks must be synchronous database work. Remote effects require explicit idempotency or reconciliation contracts.
 - Keep provider-specific code under `src/providers/`.
 - Preserve Apache-2.0 licensing and required attribution in source and packaged distributions.

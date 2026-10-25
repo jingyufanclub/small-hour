@@ -151,8 +151,20 @@ export type ModelCallRecord = ModelCallIdentity & (
 );
 
 export interface ModelCallHooks {
-  admit?(context: ModelCallContext): boolean | Promise<boolean>;
-  record?(call: Readonly<ModelCallRecord>, context: ModelCallContext): void | Promise<void>;
+  admit?(context: ModelCallContext, request?: ModelCallRequest): boolean | Promise<boolean>;
+  record?(call: Readonly<ModelCallRecord>, context: ModelCallContext, completion?: ModelCallCompletion): void | Promise<void>;
+  check?(callId: string, result: ModelCallCheck): void | Promise<void>;
+}
+
+export type ModelCallRequest = Omit<ProviderRequest, "signal" | "trace">;
+export type ModelCallCompletion = { durationMs: number } & (
+  | { response: ProviderResponse; errorCode?: never }
+  | { errorCode: string; response?: never }
+);
+export interface ModelCallCheck {
+  name: string;
+  verdict: "accepted" | "rejected" | "unavailable";
+  issues: readonly string[];
 }
 
 export interface StructuredOutputSpec<TValue> {

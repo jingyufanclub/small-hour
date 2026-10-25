@@ -1,14 +1,20 @@
 # Install and upgrade
 
-Requires Node.js 26.10+ with ESM imports. Install the built [0.14.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.14.0):
+Requires Node.js 26.10+ with ESM imports. Install the built [0.15.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.15.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.14.0/small-hour-0.14.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.15.0/small-hour-0.15.0.tgz
 ```
 
 Commit your manifest and lockfile; `npm ci` verifies recorded integrity. Releases include `SHA256SUMS`.
 
 Artifacts include JavaScript and TypeScript declarations. Public npm publication is not configured. Source installs require `nvm use`, `npm ci`, and `npm run build` at a pinned commit.
+
+## Model-call evidence
+
+Use `SqliteModelCallStore` in place of `SqliteModelSpendStore`; inspection returns `StoredModelCall`. Stop old writers and back up the database before initialization. Setup renames the spending tables to `model_calls` and `model_call_scopes`, retaining charges and held reservations. Historical content is explicitly unavailable. Existing app tables/views with either new name need resolution before setup.
+
+Call-store hooks receive normalized request/completion evidence and support validation checks. Wrappers must forward the additional arguments and `check` hook. Content capture is opt-in and independent of diagnostic tracing. See the [current record contract](spending-records.md) and [schema](storage-schema.md).
 
 ## Worker claim recovery
 

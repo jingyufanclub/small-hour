@@ -1,10 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource } from "../../src/index.js";
-import { SqliteModelSpendStore, type ModelSpendPolicy } from "../../src/durable/sqlite.js";
+import { SqliteModelCallStore, type ModelSpendPolicy } from "../../src/durable/sqlite.js";
 
 const db = new DatabaseSync(process.argv[2]); db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON");
 const stage = process.argv[3], account = stage === "account" ? "a" : process.argv[4];
-const spend = new SqliteModelSpendStore(db);
+const spend = new SqliteModelCallStore(db);
 const competing = stage === "shared" || stage === "account";
 if (competing) {
   const go = new Promise<void>(resolve => process.once("message", () => resolve())); process.send!("ready"); await go;

@@ -15,7 +15,7 @@ export type TraceContent =
   | { status: "captured"; value: unknown; bytes: number }
   | { status: "omitted"; reason: "disabled" }
   | { status: "omitted"; reason: "size_limit"; bytes: number; maxBytes: number }
-  | { status: "unavailable"; reason: "serialization_failed" };
+  | { status: "unavailable"; reason: "serialization_failed" | "not_recorded" };
 
 type TraceDetail =
   | { type: "turn.started" }
@@ -85,6 +85,11 @@ export function readTracingOptions(options: TracingOptions | undefined): Tracing
 
 export interface TraceSpan { readonly context: TraceContext; readonly startedAt: number; closed: boolean }
 
+export function traceContext(parent?: TraceInput): TraceContext {
+  return Object.freeze({ traceId: parent?.traceId ?? randomBytes(16).toString("hex"),
+    spanId: randomBytes(8).toString("hex"), ...(parent?.parentSpanId ? { parentSpanId: parent.parentSpanId } : {}) });
+}
+
 function jsonData(value: unknown, parents = new Set<object>()): unknown {
   if (value === null || value === undefined || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -111,19 +116,28 @@ function jsonData(value: unknown, parents = new Set<object>()): unknown {
   } finally { parents.delete(value); }
 }
 
+export function captureContent(read: () => unknown, options?: { maxBytes: number }): TraceContent {
+  if (!options) return { status: "omitted", reason: "disabled" };
+  try {
+    const json = JSON.stringify(jsonData(read()));
+    if (json === undefined) throw new TypeError("not JSON");
+    const bytes = Buffer.byteLength(json), maxBytes = options.maxBytes;
+    if (bytes > maxBytes) return { status: "omitted", reason: "size_limit", bytes, maxBytes };
+    return { status: "captured", value: JSON.parse(json), bytes };
+  } catch { return { status: "unavailable", reason: "serialization_failed" }; }
+}
+
 export class TurnTrace {
   readonly root: TraceSpan;
   private readonly counts = { eventCount: 0, exportFailures: 0, contentOmissions: 0, captureFailures: 0 };
   private closed = false;
 
-  constructor(private readonly options: TracingOptions, private readonly identity: { agentId: string; turnId: string }, parent?: TraceInput) {
-    this.root = { context: Object.freeze({ traceId: parent?.traceId ?? randomBytes(16).toString("hex"),
-      spanId: randomBytes(8).toString("hex"), ...(parent?.parentSpanId ? { parentSpanId: parent.parentSpanId } : {}) }),
-    startedAt: performance.now(), closed: false };
+  constructor(private readonly options: TracingOptions | undefined, private readonly identity: { agentId: string; turnId: string }, parent?: TraceInput) {
+    this.root = { context: traceContext(parent), startedAt: performance.now(), closed: false };
   }
 
   child(parentSpanId = this.root.context.spanId): TraceSpan {
-    return { context: Object.freeze({ traceId: this.root.context.traceId, parentSpanId, spanId: randomBytes(8).toString("hex") }),
+    return { context: traceContext({ traceId: this.root.context.traceId, parentSpanId }),
       startedAt: performance.now(), closed: false };
   }
   duration(span: TraceSpan): number { return Math.max(0, performance.now() - span.startedAt); }
@@ -133,6 +147,7 @@ export class TurnTrace {
   emit(span: TraceSpan, detail: TraceDetail, content?: () => unknown): void {
     if (this.closed || span.closed) return;
     this.counts.eventCount++;
+    if (!this.options) return;
     try {
       const event: TraceEvent = { ...structuredClone(detail), ...this.identity, ...span.context,
         sequence: this.counts.eventCount, timestamp: Date.now(), ...(content ? { content: this.capture(content) } : {}) };
@@ -144,7 +159,8 @@ export class TurnTrace {
     } catch { this.counts.exportFailures++; }
   }
 
-  provider(span: TraceSpan): ProviderTraceObserver {
+  provider(span: TraceSpan): ProviderTraceObserver | undefined {
+    if (!this.options) return undefined;
     return {
       context: span.context,
       request: body => this.emit(span, { type: "model.request", format: "provider" }, () => body),
@@ -153,13 +169,9 @@ export class TurnTrace {
   }
 
   private capture(read: () => unknown): TraceContent {
-    if (!this.options.content) { this.counts.contentOmissions++; return { status: "omitted", reason: "disabled" }; }
-    try {
-      const json = JSON.stringify(jsonData(read()));
-      if (json === undefined) throw new TypeError("not JSON");
-      const bytes = Buffer.byteLength(json), maxBytes = this.options.content.maxBytes;
-      if (bytes > maxBytes) { this.counts.contentOmissions++; return { status: "omitted", reason: "size_limit", bytes, maxBytes }; }
-      return { status: "captured", value: JSON.parse(json), bytes };
-    } catch { this.counts.captureFailures++; return { status: "unavailable", reason: "serialization_failed" }; }
+    const captured = captureContent(read, this.options?.content);
+    if (captured.status === "omitted") this.counts.contentOmissions++;
+    if (captured.status === "unavailable") this.counts.captureFailures++;
+    return captured;
   }
 }

@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, type RuntimeOptions } from "../src/index.js";
-import { SqliteModelSpendStore } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore } from "../src/durable/sqlite.js";
 
 function transport(responses: Array<{ status: number; body: unknown; requestId: string } | Error>, options: Partial<RuntimeOptions> = {}) {
   const requests: Record<string, any>[] = [];
@@ -42,7 +42,7 @@ test("an injected Anthropic client cannot hide SDK retries from the runtime budg
 for (const failure of [400, 408, 429, 503, "connection"] as const) {
   test(`Anthropic ${failure} failure preserves the spending decision before any retry`, async t => {
     const db = new DatabaseSync(":memory:"); t.after(() => db.close());
-    const spend = new SqliteModelSpendStore(db); spend.initialize();
+    const spend = new SqliteModelCallStore(db); spend.initialize();
     const { runtime, requests } = transport([
       failure === "connection" ? new Error("connection lost")
         : { status: failure, requestId: "failed-request", body: { type: "error", error: { type: "api_error", message: "unavailable" } } },

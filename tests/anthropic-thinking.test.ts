@@ -5,7 +5,7 @@ import test from "node:test";
 import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicProvider, type AnthropicProviderOptions } from "../src/providers/anthropic.js";
 import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, ToolRegistry, type RuntimeOptions } from "../src/index.js";
-import { SqliteModelSpendStore, SqliteModelStepStore } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, SqliteModelStepStore } from "../src/durable/sqlite.js";
 
 type AdaptiveThinking = { type: "adaptive"; effort?: "low" | "medium" | "high" | "xhigh" | "max" };
 
@@ -141,7 +141,7 @@ test("malformed adaptive provider options fail during construction", () => {
 test("adaptive calls share spending admission and completed replay preserves the provider profile contract", async t => {
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
-  const spend = new SqliteModelSpendStore(db), steps = new SqliteModelStepStore(db);
+  const spend = new SqliteModelCallStore(db), steps = new SqliteModelStepStore(db);
   spend.initialize(); steps.initialize();
   const hooks = spend.hooks({
     quote: context => {

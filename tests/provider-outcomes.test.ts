@@ -9,7 +9,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { EmptyMemorySource, RuntimeError, SmallHourRuntime, StaticPersonaSource, ToolRegistry,
   type ModelCallRecord, type ProviderResponse, type RuntimeOptions } from "../src/index.js";
 import { AnthropicProvider } from "../src/providers/anthropic.js";
-import { SqliteModelSpendStore, SqliteModelStepStore, SqliteOperationStore } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, SqliteModelStepStore, SqliteOperationStore } from "../src/durable/sqlite.js";
 
 const request = { scope: "app", id: "reply", kind: "compose", version: "1", input: { itemId: "item-7" } };
 const input = { agentId: "app", input: "Process item-7.", allowedTools: ["save"] };
@@ -24,7 +24,7 @@ function fixture(t: TestContext) {
   const connections = new Set<DatabaseSync>();
   const open = () => {
     const db = new DatabaseSync(join(directory, "app.sqlite")); connections.add(db);
-    const steps = new SqliteModelStepStore(db), spend = new SqliteModelSpendStore(db), operations = new SqliteOperationStore(db);
+    const steps = new SqliteModelStepStore(db), spend = new SqliteModelCallStore(db), operations = new SqliteOperationStore(db);
     steps.initialize(); spend.initialize(); operations.initialize();
     return { db, steps, spend, operations, close: () => { db.close(); connections.delete(db); } };
   };

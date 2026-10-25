@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource,
   type ModelCallHooks, type ModelProvider, type ProviderResponse } from "../src/index.js";
-import { SqliteModelSpendStore, SqliteTaskRunner, type ModelRecoveryContract, type TaskState, type TaskWorkflow } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, SqliteTaskRunner, type ModelRecoveryContract, type TaskState, type TaskWorkflow } from "../src/durable/sqlite.js";
 
 const task = { scope: "app", id: "reply", kind: "compose", version: "1", input: { itemId: "item-7" } };
 const schedule = { concurrencyScope: "app", dueAt: 0, maxAttempts: 2 };
@@ -28,7 +28,7 @@ function fixture(t: TestContext, options: {
   const open = () => {
     const db = new DatabaseSync(join(directory, "app.sqlite")); connections.add(db);
     db.exec("CREATE TABLE IF NOT EXISTS effects (id TEXT PRIMARY KEY, body TEXT NOT NULL)");
-    const spend = new SqliteModelSpendStore(db); spend.initialize();
+    const spend = new SqliteModelCallStore(db); spend.initialize();
     const hooks = spend.hooks({ quote: () => ({ scope: "budget", limit, amount: 10, pricing: { revision: 1 } }), charge: () => 2 });
     const runtime = new SmallHourRuntime({ provider: { name: "fixture", isRetryable: () => true, failureInfo: options.failureInfo,
       complete: request => { calls++; assert.equal(request.messages[0].content, '{"itemId":"item-7"}'); return complete(request); } },
@@ -187,11 +187,11 @@ test("an invalid admission return does not create refusal evidence", async t => 
 
 test("failed spending admission storage neither dispatches nor credits a pause", async t => {
   const f = fixture(t), app = f.open(); app.runner.enqueue(task, schedule);
-  app.db.exec(`CREATE TRIGGER reject_admission BEFORE INSERT ON small_hour_model_spend
+  app.db.exec(`CREATE TRIGGER reject_admission BEFORE INSERT ON model_calls
     BEGIN SELECT RAISE(ABORT, 'admission unavailable'); END`);
   const state = (await app.runner.run(task))!;
   assert.equal(state.status, "uncertain"); assert.equal(state.admissionPauses, 0); assert.equal(f.calls(), 0);
-  assert.equal(app.db.prepare("SELECT count(*) n FROM small_hour_model_spend").get()?.n, 0);
+  assert.equal(app.db.prepare("SELECT count(*) n FROM model_calls").get()?.n, 0);
 });
 
 test("adding pause permission cannot change the contract of saved work", async t => {

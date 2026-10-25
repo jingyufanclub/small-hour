@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { EmptyMemorySource, SmallHourRuntime, StaticPersonaSource, type ModelProvider } from "../src/index.js";
-import { SqliteModelSpendStore, SqliteModelStepStore } from "../src/durable/sqlite.js";
+import { SqliteModelCallStore, SqliteModelStepStore } from "../src/durable/sqlite.js";
 
 const request = { scope: "app", id: "compose", kind: "compose", version: "1", input: { id: "item-7" } };
 const input = { agentId: "app", input: "Describe item-7.", allowedTools: [] };
@@ -16,14 +16,14 @@ function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), "small-hour-recovery-spend-")), connections = new Set<DatabaseSync>();
   const open = () => {
     const db = new DatabaseSync(join(directory, "app.sqlite")); connections.add(db);
-    const spend = new SqliteModelSpendStore(db), steps = new SqliteModelStepStore(db);
+    const spend = new SqliteModelCallStore(db), steps = new SqliteModelStepStore(db);
     spend.initialize(); steps.initialize();
     return { db, spend, steps, close() { db.close(); connections.delete(db); } };
   };
   t.after(() => { for (const db of connections) db.close(); rmSync(directory, { recursive: true, force: true }); });
   return { open };
 }
-function runtime(spend: SqliteModelSpendStore, provider: ModelProvider, limit = 20) {
+function runtime(spend: SqliteModelCallStore, provider: ModelProvider, limit = 20) {
   return new SmallHourRuntime({ provider, persona: new StaticPersonaSource("Describe supplied facts."), memory: new EmptyMemorySource(),
     retry: { attempts: 1 }, modelCalls: spend.hooks({ quote: () => ({ scope: "budget", limit, amount: 10, pricing: { revision: 1 } }),
       charge: tokens => tokens.freshInputTokens + tokens.outputTokens }) });
@@ -36,7 +36,7 @@ function decision(steps: SqliteModelStepStore) {
 for (const failure of ["transport", "missing-usage", "settlement-write"] as const) {
   test(`recovery after ${failure} retains the old charge and spends only remaining allowance`, async t => {
     const f = fixture(t), app = f.open(); let calls = 0;
-    if (failure === "settlement-write") app.db.exec(`CREATE TRIGGER reject_settlement BEFORE UPDATE ON small_hour_model_spend
+    if (failure === "settlement-write") app.db.exec(`CREATE TRIGGER reject_settlement BEFORE UPDATE ON model_calls
       BEGIN SELECT RAISE(ABORT, 'settlement unavailable'); END`);
     const provider: ModelProvider = { name: "fixture", async complete() {
       calls++;

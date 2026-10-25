@@ -1,6 +1,7 @@
 import { types } from "node:util";
 import { readModelCallAdmission, readModelCallStop } from "../model-call-record.js";
-import type { ModelCallContext, ModelCallHooks, ModelCallRecord, TokenUsage } from "../types.js";
+import type { ModelCallCheck, ModelCallContext, ModelCallHooks, ModelCallRecord, ModelCallRequest, TokenUsage } from "../types.js";
+import { captureContent, readTraceContext, type TraceContent } from "../tracing.js";
 import { canonicalJson } from "./json.js";
 import type { SqliteDatabase } from "./sqlite.js";
 import { initializeTimestamps, readTimestamps, recordTime, type DurableClockOptions, type RecordTimestamps } from "./lifecycle.js";
@@ -30,7 +31,7 @@ export interface ModelSpendDenial {
 export type ModelSpendDecision = ModelSpendQuote | ModelSpendDenial;
 
 export interface ModelSpendPolicy {
-  quote(context: ModelCallContext): ModelSpendDecision;
+  quote(context: ModelCallContext, request?: Readonly<ModelCallRequest>): ModelSpendDecision;
   charge(usage: Readonly<TokenUsage>, pricing: unknown): number;
 }
 
@@ -38,8 +39,22 @@ export type ModelSpendResolution = { evidence: string } & (
   { status: "accepted"; amount: number } | { status: "rejected" }
 );
 
-type CallIdentity = Pick<ModelCallContext, "agentId" | "turnId" | "callId" | "provider" | "model" | "attempt" | "hop" | "maxTokens" | "thinking">;
-type QuotedModelSpendRecord = RecordTimestamps & {
+type CallIdentity = Pick<ModelCallContext, "agentId" | "turnId" | "callId" | "provider" | "model" | "attempt" | "hop" | "maxTokens" | "thinking" | "trace">;
+export interface ModelCallEvidence {
+  attributes: ModelCallAttributes;
+  request: TraceContent;
+  response: TraceContent | null;
+  failure: { code: string } | null;
+  durationMs: number | null;
+  finishedAt: number | null;
+  checks: Record<string, ModelCallCheck>;
+}
+export type ModelCallAttributes = Record<string, string | number | boolean | null>;
+export interface ModelCallStoreOptions extends DurableClockOptions {
+  content?: { maxBytes: number };
+  attributes?(identity: Readonly<CallIdentity>): ModelCallAttributes;
+}
+type QuotedStoredModelCall = RecordTimestamps & ModelCallEvidence & {
   context: CallIdentity;
   quote: ModelSpendQuote;
   denial?: never;
@@ -51,7 +66,7 @@ type QuotedModelSpendRecord = RecordTimestamps & {
   | { status: "rejected" | "denied"; chargedAmount: 0 }
 );
 
-export type ModelSpendRecord = QuotedModelSpendRecord | (RecordTimestamps & {
+export type StoredModelCall = QuotedStoredModelCall | (RecordTimestamps & ModelCallEvidence & {
   context: CallIdentity;
   quote: null;
   denial: ModelSpendDenial;
@@ -93,7 +108,7 @@ function synchronous<T>(value: T): T {
 }
 
 function identity(context: ModelCallContext): CallIdentity {
-  const { agentId, turnId, callId, provider, model, attempt, hop, maxTokens, thinking } = context;
+  const { agentId, turnId, callId, provider, model, attempt, hop, maxTokens, thinking, trace } = context;
   for (const value of [agentId, turnId, callId, provider]) text(value);
   if (model !== undefined) text(model);
   for (const value of [attempt, hop, maxTokens]) amount(value);
@@ -104,6 +119,7 @@ function identity(context: ModelCallContext): CallIdentity {
   }
   return { agentId, turnId, callId, provider, attempt, hop, maxTokens,
     ...(model === undefined ? {} : { model }),
+    ...(trace === undefined ? {} : { trace: readTraceContext(trace) }),
     ...(thinking === undefined ? {} : { thinking: { enabled: true, budgetTokens: thinking.budgetTokens } }) };
 }
 
@@ -153,6 +169,7 @@ function record(value: Readonly<ModelCallRecord>, context: CallIdentity): ModelC
     || !["not_started", "responded", "rejected", "unknown"].includes(value.status)
     || !["unrecorded", "recorded"].includes(value.accounting)) throw new TypeError("Model accounting must match its reserved call.");
   if (value.requestId !== undefined) text(value.requestId);
+  if (canonicalJson(value.trace ?? null) !== canonicalJson(context.trace ?? null)) throw new TypeError("Model accounting changed the call trace.");
   let usage: TokenUsage | undefined;
   if (value.usage !== undefined) {
     if (value.status !== "responded") throw new TypeError("Only a provider response can supply token usage.");
@@ -163,7 +180,8 @@ function record(value: Readonly<ModelCallRecord>, context: CallIdentity): ModelC
   }
   const stop = readModelCallStop(value);
   const base = { callId: value.callId, provider: value.provider, attempt: value.attempt, hop: value.hop,
-    accounting: "unrecorded" as const, ...(value.requestId === undefined ? {} : { requestId: value.requestId }), ...(usage ? { usage } : {}) };
+    accounting: "unrecorded" as const, ...(value.requestId === undefined ? {} : { requestId: value.requestId }), ...(usage ? { usage } : {}),
+    ...(value.trace === undefined ? {} : { trace: readTraceContext(value.trace) }) };
   return value.status === "responded" ? { ...base, status: value.status, ...(stop ? { stop } : {}) } : { ...base, status: value.status };
 }
 
@@ -183,9 +201,65 @@ const validAmounts = `typeof(reserved_amount) = 'integer' AND reserved_amount BE
     OR (status = 'accepted' AND typeof(charged_amount) = 'integer' AND charged_amount BETWEEN 0 AND 9007199254740991)
     OR (status IN ('rejected', 'denied') AND charged_amount = 0))`;
 
-function storedRecord(row: Record<string, unknown>, version: 1): QuotedModelSpendRecord;
-function storedRecord(row: Record<string, unknown>, version: 3): ModelSpendRecord;
-function storedRecord(row: Record<string, unknown>, version: 1 | 3): ModelSpendRecord {
+const notRecorded: TraceContent = { status: "unavailable", reason: "not_recorded" };
+
+function content(value: unknown): TraceContent {
+  const item = value as TraceContent | null;
+  if (!item || typeof item !== "object") throw new TypeError("Invalid captured content.");
+  if (item.status === "captured") {
+    const captured = captureContent(() => item.value, { maxBytes: Number.MAX_SAFE_INTEGER });
+    if (captured.status !== "captured" || captured.bytes !== item.bytes) throw new TypeError("Invalid captured content size.");
+    return captured;
+  }
+  if (item.status === "omitted") {
+    if (item.reason === "disabled") return { status: item.status, reason: item.reason };
+    if (item.reason === "size_limit") {
+      amount(item.bytes); amount(item.maxBytes);
+      if (item.maxBytes > 0 && item.bytes > item.maxBytes) return { status: item.status, reason: item.reason, bytes: item.bytes, maxBytes: item.maxBytes };
+    }
+  }
+  if (item.status === "unavailable" && (item.reason === "serialization_failed" || item.reason === "not_recorded")) return { status: item.status, reason: item.reason };
+  throw new TypeError("Invalid content capture outcome.");
+}
+
+function check(value: ModelCallCheck): ModelCallCheck {
+  text(value.name);
+  if (!["accepted", "rejected", "unavailable"].includes(value.verdict) || !Array.isArray(value.issues)) throw new TypeError("Invalid model check.");
+  if (value.issues.some(issue => typeof issue !== "string")) throw new TypeError("Model check issues must be strings.");
+  return { name: value.name, verdict: value.verdict, issues: [...value.issues] };
+}
+
+function attributes(value: ModelCallAttributes): ModelCallAttributes {
+  const selected = JSON.parse(canonicalJson(value));
+  if (!selected || typeof selected !== "object" || Array.isArray(selected)
+    || Object.values(selected).some(item => item !== null && !["string", "number", "boolean"].includes(typeof item))) {
+    throw new TypeError("Call attributes must be a JSON object of scalar values.");
+  }
+  return selected;
+}
+
+function evidence(row: Record<string, unknown>): ModelCallEvidence {
+  const request = row.request_json === undefined ? notRecorded : content(JSON.parse(String(row.request_json)));
+  const response = row.response_json == null ? null : content(JSON.parse(String(row.response_json)));
+  const failure = row.failure_code == null ? null : { code: String(row.failure_code) };
+  if (failure) text(row.failure_code);
+  const durationMs = row.duration_ms ?? null, finishedAt = row.finished_at ?? null;
+  if (durationMs !== null && (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0)) throw new TypeError("Invalid call duration.");
+  if (finishedAt !== null) amount(finishedAt);
+  if ((durationMs === null) !== (finishedAt === null) || (response !== null && failure !== null)) throw new TypeError("Inconsistent call completion.");
+  const checks = row.checks_json === undefined ? {} : JSON.parse(String(row.checks_json));
+  if (!checks || typeof checks !== "object" || Array.isArray(checks)) throw new TypeError("Invalid call checks.");
+  for (const [name, value] of Object.entries(checks)) {
+    const checked = check(value as ModelCallCheck);
+    if (name !== checked.name) throw new TypeError("Model check identity changed.");
+  }
+  return { request, response, failure, durationMs, finishedAt: finishedAt as number | null, checks,
+    attributes: row.attributes_json === undefined ? {} : attributes(JSON.parse(String(row.attributes_json))) };
+}
+
+function storedRecord(row: Record<string, unknown>, version: 1): QuotedStoredModelCall;
+function storedRecord(row: Record<string, unknown>, version: 3): StoredModelCall;
+function storedRecord(row: Record<string, unknown>, version: 1 | 3): StoredModelCall {
   try {
     text(row.call_id);
     if (row.format_version !== version) throw new TypeError("Unsupported spending record.");
@@ -194,7 +268,7 @@ function storedRecord(row: Record<string, unknown>, version: 1 | 3): ModelSpendR
     if (offered.denied) {
       if (version !== 3 || row.status !== "denied" || row.reserved_amount !== 0 || row.charged_amount !== 0
         || row.record_json !== null || row.resolution_json !== null) throw new TypeError("Inconsistent spending denial.");
-      return { context, quote: null, denial: offered, status: "denied", chargedAmount: 0, record: null, resolution: null, ...readTimestamps(row) };
+      return { context, quote: null, denial: offered, status: "denied", chargedAmount: 0, record: null, resolution: null, ...readTimestamps(row), ...evidence(row) };
     }
     if (offered.amount !== row.reserved_amount
       || (version === 1 && (offered.scopes !== undefined || offered.scope !== row.scope))) throw new TypeError("Spending identity changed.");
@@ -209,21 +283,38 @@ function storedRecord(row: Record<string, unknown>, version: 1 | 3): ModelSpendR
       || ((status === "rejected" || status === "denied") && chargedAmount !== 0)
       || (resolved?.status === "accepted" && chargedAmount !== resolved.amount)) throw new TypeError("Inconsistent spending outcome.");
     return { context, quote: offered, status: expectedStatus, chargedAmount, record: savedRecord, resolution: resolved,
-      ...(version === 1 ? { createdAt: null, updatedAt: null } : readTimestamps(row)) } as ModelSpendRecord;
+      ...(version === 1 ? { createdAt: null, updatedAt: null } : readTimestamps(row)), ...evidence(row) } as StoredModelCall;
   } catch (cause) {
     throw new ModelSpendError("invalid_record", "The stored spending record failed validation.", { cause });
   }
 }
 
-export class SqliteModelSpendStore {
+export class SqliteModelCallStore {
   private readonly now: () => number;
-  constructor(private readonly database: SqliteDatabase, options: DurableClockOptions = {}) { this.now = options.now ?? Date.now; }
+  private readonly capture?: { maxBytes: number };
+  private readonly describe?: ModelCallStoreOptions["attributes"];
+  constructor(private readonly database: SqliteDatabase, options: ModelCallStoreOptions = {}) {
+    this.now = options.now ?? Date.now;
+    this.describe = options.attributes;
+    if (options.content) {
+      amount(options.content.maxBytes);
+      if (!options.content.maxBytes) throw new TypeError("Content capture requires a positive byte limit.");
+      this.capture = { ...options.content };
+    }
+  }
 
   initialize(): void {
     const db = this.database;
     db.exec("SAVEPOINT small_hour_spending_schema");
     try {
-      db.exec(`CREATE TABLE IF NOT EXISTS small_hour_model_spend (
+      if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'small_hour_model_spend'").get()) {
+        if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_calls'").get()) throw new ModelSpendError("invalid_record", "Two model call stores exist; select one authority before setup.");
+        db.exec("ALTER TABLE small_hour_model_spend RENAME TO model_calls");
+        if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'small_hour_model_spend_scopes'").get()) {
+          db.exec("ALTER TABLE small_hour_model_spend_scopes RENAME TO model_call_scopes; DROP INDEX IF EXISTS small_hour_model_spend_scopes_lookup");
+        }
+      }
+      db.exec(`CREATE TABLE IF NOT EXISTS model_calls (
       call_id TEXT PRIMARY KEY NOT NULL,
       context_json TEXT NOT NULL,
       quote_json TEXT NOT NULL,
@@ -235,30 +326,41 @@ export class SqliteModelSpendStore {
       format_version INTEGER NOT NULL,
       CHECK (${validAmounts})
       )`);
-      const legacy = db.prepare("SELECT name FROM pragma_table_info('small_hour_model_spend') WHERE name = 'scope'").get();
-      if (!legacy && !db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'small_hour_model_spend_scopes'").get()
-        && db.prepare("SELECT call_id FROM small_hour_model_spend LIMIT 1").get()) {
+      const legacy = db.prepare("SELECT name FROM pragma_table_info('model_calls') WHERE name = 'scope'").get();
+      if (!legacy && !db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_call_scopes'").get()
+        && db.prepare("SELECT call_id FROM model_calls LIMIT 1").get()) {
         throw new ModelSpendError("invalid_record", "The spending scope index is missing.");
       }
-      db.exec(`CREATE TABLE IF NOT EXISTS small_hour_model_spend_scopes (
-        call_id TEXT NOT NULL REFERENCES small_hour_model_spend(call_id) ON DELETE RESTRICT,
+      db.exec(`CREATE TABLE IF NOT EXISTS model_call_scopes (
+        call_id TEXT NOT NULL REFERENCES model_calls(call_id) ON DELETE RESTRICT,
         scope TEXT NOT NULL, PRIMARY KEY (call_id, scope)
-      ); CREATE INDEX IF NOT EXISTS small_hour_model_spend_scopes_lookup ON small_hour_model_spend_scopes (scope, call_id)`);
-      initializeTimestamps(db, "small_hour_model_spend_scopes", []);
+      ); CREATE INDEX IF NOT EXISTS model_call_scopes_lookup ON model_call_scopes (scope, call_id)`);
+      initializeTimestamps(db, "model_call_scopes", []);
       if (legacy) {
         let after: string | null = null;
         for (;;) {
-          const row = db.prepare(`SELECT * FROM small_hour_model_spend ${after === null ? "" : "WHERE call_id > ?"} ORDER BY call_id LIMIT 1`)
+          const row = db.prepare(`SELECT * FROM model_calls ${after === null ? "" : "WHERE call_id > ?"} ORDER BY call_id LIMIT 1`)
             .get(...(after === null ? [] : [after])) as Record<string, unknown> | undefined;
           if (!row) break;
           const saved = storedRecord(row, 1);
           this.insertScopes(saved.context.callId, scopes(saved.quote).map(value => value.scope), null);
-          changed(db.prepare("UPDATE small_hour_model_spend SET format_version = 2 WHERE call_id = ?").run(saved.context.callId));
+          changed(db.prepare("UPDATE model_calls SET format_version = 2 WHERE call_id = ?").run(saved.context.callId));
           after = saved.context.callId;
         }
-        db.exec("DROP INDEX IF EXISTS small_hour_model_spend_scope; ALTER TABLE small_hour_model_spend DROP COLUMN scope");
+        db.exec("DROP INDEX IF EXISTS small_hour_model_spend_scope; DROP INDEX IF EXISTS model_calls_scope; ALTER TABLE model_calls DROP COLUMN scope");
       }
-      initializeTimestamps(db, "small_hour_model_spend", [[2, 3]]);
+      initializeTimestamps(db, "model_calls", [[2, 3]]);
+      if (!db.prepare("SELECT name FROM pragma_table_info('model_calls') WHERE name = 'request_json'").get()) {
+        db.exec(`ALTER TABLE model_calls ADD COLUMN request_json TEXT NOT NULL DEFAULT '{"status":"unavailable","reason":"not_recorded"}';
+          ALTER TABLE model_calls ADD COLUMN response_json TEXT;
+          ALTER TABLE model_calls ADD COLUMN failure_code TEXT;
+          ALTER TABLE model_calls ADD COLUMN duration_ms REAL CHECK (duration_ms IS NULL OR duration_ms >= 0);
+          ALTER TABLE model_calls ADD COLUMN finished_at INTEGER CHECK (finished_at IS NULL OR (typeof(finished_at) = 'integer' AND finished_at BETWEEN 0 AND 9007199254740991));
+          ALTER TABLE model_calls ADD COLUMN checks_json TEXT NOT NULL DEFAULT '{}';
+          ALTER TABLE model_calls ADD COLUMN attributes_json TEXT NOT NULL DEFAULT '{}';`);
+      }
+      db.exec(`CREATE INDEX IF NOT EXISTS model_calls_turn ON model_calls (json_extract(context_json, '$.agentId'), json_extract(context_json, '$.turnId'));
+        CREATE INDEX IF NOT EXISTS model_calls_trace ON model_calls (json_extract(context_json, '$.trace.traceId'));`);
       db.exec("RELEASE SAVEPOINT small_hour_spending_schema");
     } catch (cause) {
       try { db.exec("ROLLBACK TO SAVEPOINT small_hour_spending_schema"); db.exec("RELEASE SAVEPOINT small_hour_spending_schema"); }
@@ -273,11 +375,13 @@ export class SqliteModelSpendStore {
       throw new ModelSpendError("invalid_request", "Spending requires synchronous quote and charge functions.");
     }
     return {
-      admit: context => {
+      admit: (context, request) => {
         const call = identity(context);
+        const captured = request === undefined ? notRecorded : captureContent(() => request, this.capture);
         return this.transaction(() => {
           if (this.inspect(call.callId)) throw new ModelSpendError("call_exists", "This call already has a spending decision.");
-          const offered = decision(synchronous(policy.quote(context)));
+          const offered = decision(synchronous(policy.quote(context, request)));
+          const details = this.describe ? attributes(synchronous(this.describe(structuredClone(call)))) : {};
           let admitted = !offered.denied;
           if (!offered.denied) {
             for (const { scope, limit } of scopes(offered)) {
@@ -286,39 +390,64 @@ export class SqliteModelSpendStore {
             }
           }
           const time = recordTime(this.now);
-          changed(this.database.prepare(`INSERT INTO small_hour_model_spend
-            (call_id, context_json, quote_json, reserved_amount, status, charged_amount, format_version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 3, ?, ?)`)
+          changed(this.database.prepare(`INSERT INTO model_calls
+            (call_id, context_json, quote_json, reserved_amount, status, charged_amount, format_version, created_at, updated_at, request_json, attributes_json)
+            VALUES (?, ?, ?, ?, ?, ?, 3, ?, ?, ?, ?)`)
             .run(call.callId, canonicalJson(call), canonicalJson(offered), offered.denied ? 0 : offered.amount,
-              admitted ? "reserved" : "denied", admitted ? null : 0, time, time));
+              admitted ? "reserved" : "denied", admitted ? null : 0, time, time, canonicalJson(captured), canonicalJson(details)));
           this.insertScopes(call.callId, offered.denied ? offered.scopes : scopes(offered).map(value => value.scope), time);
           return admitted;
         });
       },
-      record: (value, context) => this.transaction(() => {
+      record: (value, context, completion) => this.transaction(() => {
         const call = identity(context), saved = this.require(call.callId);
         if (canonicalJson(call) !== canonicalJson(saved.context)) throw new ModelSpendError("settlement_conflict", "Accounting changed the reserved call identity.");
         const checked = record(value, call), json = canonicalJson(checked);
-        if (saved.record && canonicalJson(saved.record) === json) return;
+        const response = completion?.response ? captureContent(() => completion.response, this.capture) : checked.status === "responded" ? notRecorded : null;
+        const failure = completion?.errorCode ? { code: completion.errorCode } : null;
+        const durationMs = completion?.durationMs ?? null;
+        if (durationMs !== null && (!Number.isFinite(durationMs) || durationMs < 0)) throw new TypeError("Invalid call duration.");
+        if (failure) text(failure.code);
+        if ((completion?.response && checked.status !== "responded") || (failure && checked.status === "responded")) throw new TypeError("Completion contradicts the call outcome.");
+        if (saved.record && canonicalJson(saved.record) === json && canonicalJson(saved.response) === canonicalJson(response)
+          && canonicalJson(saved.failure) === canonicalJson(failure) && saved.durationMs === durationMs) return;
         if (saved.status !== "reserved") throw new ModelSpendError("settlement_conflict", "This call already has a different spending outcome.");
-        let status: ModelSpendRecord["status"] = "unknown", charged: number | null = null;
+        let status: StoredModelCall["status"] = "unknown", charged: number | null = null;
         if (checked.status === "responded" && checked.usage) {
           charged = synchronous(policy.charge(checked.usage, saved.quote.pricing)); amount(charged); status = "accepted";
         } else if (checked.status === "rejected") { status = "rejected"; charged = 0; }
-        changed(this.database.prepare("UPDATE small_hour_model_spend SET status = ?, charged_amount = ?, record_json = ?, updated_at = ? WHERE call_id = ?")
-          .run(status, charged, json, recordTime(this.now, saved.updatedAt), call.callId));
+        const time = recordTime(this.now, saved.updatedAt);
+        changed(this.database.prepare(`UPDATE model_calls SET status = ?, charged_amount = ?, record_json = ?, updated_at = ?,
+          response_json = ?, failure_code = ?, duration_ms = ?, finished_at = ? WHERE call_id = ?`)
+          .run(status, charged, json, time, response === null ? null : canonicalJson(response), failure?.code ?? null, durationMs,
+            completion === undefined ? null : time, call.callId));
       }),
+      check: (callId, result) => this.recordCheck(callId, result),
     };
   }
 
-  inspect(callId: string): ModelSpendRecord | undefined {
+  recordCheck(callId: string, result: ModelCallCheck): void {
+    const checked = check(result);
+    this.transaction(() => {
+      const saved = this.require(callId);
+      if (saved.record?.status !== "responded") throw new ModelSpendError("settlement_conflict", "Validation requires a recorded provider response.");
+      if (Object.hasOwn(saved.checks, checked.name)) {
+        if (canonicalJson(saved.checks[checked.name]) === canonicalJson(checked)) return;
+        throw new ModelSpendError("settlement_conflict", "A model check already has a different outcome.");
+      }
+      changed(this.database.prepare("UPDATE model_calls SET checks_json = ?, updated_at = ? WHERE call_id = ?")
+        .run(canonicalJson({ ...saved.checks, [checked.name]: checked }), recordTime(this.now, saved.updatedAt), callId));
+    });
+  }
+
+  inspect(callId: string): StoredModelCall | undefined {
     text(callId);
-    const row = this.database.prepare("SELECT * FROM small_hour_model_spend WHERE call_id = ?").get(callId) as Record<string, unknown> | undefined;
+    const row = this.database.prepare("SELECT * FROM model_calls WHERE call_id = ?").get(callId) as Record<string, unknown> | undefined;
     if (row === undefined) return undefined;
     const saved = storedRecord(row, 3), selected = saved.quote === null ? saved.denial.scopes : scopes(saved.quote).map(value => value.scope);
     const indexed = this.database.prepare(`SELECT COUNT(*) AS total,
       COALESCE(SUM(CASE WHEN scope IN (${selected.map(() => "?").join(",")}) THEN 1 ELSE 0 END), 0) AS matched
-      FROM small_hour_model_spend_scopes WHERE call_id = ?`).get(...selected, callId) as { total: number; matched: number };
+      FROM model_call_scopes WHERE call_id = ?`).get(...selected, callId) as { total: number; matched: number };
     if (indexed.total !== selected.length || indexed.matched !== selected.length) {
       throw new ModelSpendError("invalid_record", "The spending scope index does not match its decision.");
     }
@@ -332,7 +461,7 @@ export class SqliteModelSpendStore {
       COALESCE(SUM(CASE WHEN status = 'reserved' THEN reserved_amount ELSE 0 END), 0) AS reserved,
       COALESCE(SUM(CASE WHEN status = 'unknown' THEN reserved_amount ELSE 0 END), 0) AS unknown,
       COALESCE(SUM(CASE WHEN format_version = 3 AND (${validAmounts}) THEN 0 ELSE 1 END), 0) AS invalid
-      FROM small_hour_model_spend_scopes AS membership LEFT JOIN small_hour_model_spend AS spending
+      FROM model_call_scopes AS membership LEFT JOIN model_calls AS spending
         ON spending.call_id = membership.call_id WHERE membership.scope = ?`).get(scope) as Record<string, unknown>;
     try {
       if (row.invalid !== 0) throw new TypeError("Unsupported spending totals.");
@@ -344,19 +473,19 @@ export class SqliteModelSpendStore {
     }
   }
 
-  reconcile(callId: string, outcome: ModelSpendResolution): ModelSpendRecord {
+  reconcile(callId: string, outcome: ModelSpendResolution): StoredModelCall {
     const checked = resolution(outcome), json = canonicalJson(checked);
     return this.transaction(() => {
       const saved = this.require(callId);
       if (saved.resolution && canonicalJson(saved.resolution) === json) return saved;
       if (saved.status !== "reserved" && saved.status !== "unknown") throw new ModelSpendError("settlement_conflict", "Only unresolved spending can be reconciled.");
-      changed(this.database.prepare("UPDATE small_hour_model_spend SET status = ?, charged_amount = ?, resolution_json = ?, updated_at = ? WHERE call_id = ?")
+      changed(this.database.prepare("UPDATE model_calls SET status = ?, charged_amount = ?, resolution_json = ?, updated_at = ? WHERE call_id = ?")
         .run(checked.status, checked.status === "accepted" ? checked.amount : 0, json, recordTime(this.now, saved.updatedAt), callId));
       return this.require(callId);
     });
   }
 
-  private require(callId: string): ModelSpendRecord {
+  private require(callId: string): StoredModelCall {
     const saved = this.inspect(callId);
     if (!saved) throw new ModelSpendError("call_missing", "This model call has no spending reservation.");
     return saved;
@@ -364,7 +493,7 @@ export class SqliteModelSpendStore {
 
   private insertScopes(callId: string, selected: readonly string[], time: number | null): void {
     for (const scope of selected) {
-      changed(this.database.prepare("INSERT INTO small_hour_model_spend_scopes (call_id, scope, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      changed(this.database.prepare("INSERT INTO model_call_scopes (call_id, scope, created_at, updated_at) VALUES (?, ?, ?, ?)")
         .run(callId, scope, time, time));
     }
   }
