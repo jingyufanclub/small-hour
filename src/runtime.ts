@@ -144,6 +144,7 @@ export class SmallHourRuntime {
     const recordCheck = async (name: string, verdict: "accepted" | "rejected" | "unavailable", issues: readonly string[] = []) => {
       if (!this.options.modelCalls?.check) return;
       const call = report.modelCalls.at(-1)!;
+      if (this.options.modelCalls.record && call.accounting === "unrecorded") return;
       try { await timeout.run(() => this.options.modelCalls!.check!(call.callId, { name, verdict, issues })); }
       catch (cause) {
         timeout.check();
