@@ -6,7 +6,7 @@ export interface OpenAICompatibleProviderOptions {
   model: string;
   baseURL: string;
   apiKey?: string;
-  capabilities?: { tools?: boolean; structuredOutput?: boolean };
+  capabilities?: { tools?: boolean; structuredOutput?: boolean; images?: boolean };
   fetch?: typeof globalThis.fetch;
 }
 
@@ -25,11 +25,29 @@ function chatMessages(messages: readonly ProviderMessage[]): unknown[] {
       }
       return [{ role: "assistant", content: text.length ? text.join("") : null, ...(calls.length ? { tool_calls: calls } : {}) }];
     }
-    return message.content.map((block) => {
-      if (block.type === "image") throw new RuntimeError("compatible provider does not support image input", "images_unsupported");
-      return block.type === "text" ? { role: "user", content: block.text }
-        : { role: "tool", tool_call_id: block.toolUseId, content: block.content };
-    });
+    const items: unknown[] = [];
+    const multimodal = message.content.some(block => block.type === "image");
+    let parts: unknown[] = [];
+    const flush = () => {
+      if (parts.length) { items.push({ role: "user", content: parts }); parts = []; }
+    };
+    for (const block of message.content) {
+      switch (block.type) {
+        case "text":
+          if (multimodal) parts.push({ type: "text", text: block.text });
+          else items.push({ role: "user", content: block.text });
+          break;
+        case "image":
+          parts.push({ type: "image_url", image_url: { url: `data:${block.mediaType};base64,${block.data}` } });
+          break;
+        case "tool_result":
+          flush();
+          items.push({ role: "tool", tool_call_id: block.toolUseId, content: block.content });
+          break;
+      }
+    }
+    flush();
+    return items;
   });
 }
 
@@ -67,10 +85,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
   constructor(private readonly options: OpenAICompatibleProviderOptions) {
     if (!options.model.trim()) throw new TypeError("compatible provider model is required");
     this.url = endpoint(options.baseURL, "chat/completions");
-    this.capabilities = { tools: options.capabilities?.tools === true, structuredOutput: options.capabilities?.structuredOutput === true, thinkingBudget: false, images: false };
+    this.capabilities = { tools: options.capabilities?.tools === true, structuredOutput: options.capabilities?.structuredOutput === true, thinkingBudget: false, images: options.capabilities?.images === true };
   }
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
-    validateImageMessages(request.messages, false);
+    validateImageMessages(request.messages, this.capabilities.images);
     if (request.thinking) throw new RuntimeError("compatible provider does not support a thinking token budget", "thinking_unsupported");
     if (request.tools.length && !this.capabilities.tools) throw new RuntimeError("tool support must be enabled for this model and server", "tools_unsupported");
     if (request.outputSchema && !this.capabilities.structuredOutput) throw new RuntimeError("structured output support must be enabled for this model and server", "structured_output_unsupported");

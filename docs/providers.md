@@ -50,16 +50,16 @@ import { OpenAICompatibleProvider } from "small-hour/providers/openai-compatible
 
 const provider = new OpenAICompatibleProvider({
   model, baseURL, apiKey,
-  capabilities: { tools: true, structuredOutput: true },
+  capabilities: { tools: true, structuredOutput: true, images: true },
 });
 ```
 
 Supply your server's `baseURL`, normally ending in `/v1`. Only explicit credentials are used. No server, model, or fallback is selected automatically.
 
-Text works by default. Enable the shown capabilities only after verifying server/model support. Images and thinking budgets are unsupported. `maxTokens` becomes `max_tokens`.
+Text works by default. Enable the shown capabilities only after verifying server/model support. Images use ordered Chat Completions content parts with base64 data URLs. Thinking budgets are unsupported. `maxTokens` becomes `max_tokens`.
 
 ## Shared behavior
 
-Anthropic and OpenAI support [images](images.md) with compatible models. Schemas are sent unchanged; Small Hour runs your [parser](embedding.md#structured-results) afterward. SDK types do not validate actual output.
+All three adapters support [images](images.md) with compatible models; compatible endpoints require explicit opt-in. Schemas are sent unchanged; Small Hour runs your [parser](embedding.md#structured-results) afterward. SDK types do not validate actual output.
 
 Native reasoning and call IDs stay intact inside the tool exchange; provider history is not retained across turns. Refused, filtered, malformed, or incomplete responses cannot authorize accepted output or tools. Missing usage remains unknown. Bind provider settings and prices to saved workflow versions.
