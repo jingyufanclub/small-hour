@@ -6,6 +6,7 @@ import { array, HttpProviderError, httpFailureInfo, invalidResponse, isObject, i
 export interface OpenAIProviderOptions {
   model: string;
   apiKey?: string;
+  temperature?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   fetch?: typeof globalThis.fetch;
 }
@@ -86,7 +87,12 @@ export class OpenAIProvider implements ModelProvider {
   private readonly client: OpenAI;
   get model(): string { return this.options.model; }
   constructor(private readonly options: OpenAIProviderOptions) {
+    this.options = { ...options };
+    if (options.temperature !== undefined && (!Number.isFinite(options.temperature) || options.temperature < 0 || options.temperature > 2))
+      throw new TypeError("temperature must be between 0 and 2");
     if (!options.model.trim()) throw new TypeError("OpenAI model is required");
+    if (options.temperature !== undefined && options.reasoningEffort && options.reasoningEffort !== "none")
+      throw new TypeError("temperature cannot combine with reasoning effort");
     const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY ?? "";
     if (!apiKey.trim()) throw new TypeError("OpenAI apiKey or OPENAI_API_KEY is required");
     const send = options.fetch ?? globalThis.fetch;
@@ -110,6 +116,7 @@ export class OpenAIProvider implements ModelProvider {
       model: this.model, instructions: request.system.map((block) => block.text).join("\n\n"),
       input: inputItems(request.messages) as OpenAI.Responses.ResponseInput,
       max_output_tokens: request.maxTokens, store: false, stream: false, truncation: "disabled",
+      ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
       ...(this.options.reasoningEffort ? { reasoning: { effort: this.options.reasoningEffort } } : {}),
       ...(request.tools.length ? { tools: request.tools.map((tool) => ({ type: "function", name: tool.name,
         description: tool.description, parameters: tool.inputSchema, strict: tool.strict ?? true,

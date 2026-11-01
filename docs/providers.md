@@ -41,7 +41,7 @@ Credentials use `apiKey` or `OPENAI_API_KEY`. The managed endpoint is `https://a
 
 Requests set `store: false` and `truncation: "disabled"`, without conversation lookup. This does not describe every provider retention policy.
 
-`maxTokens` becomes `max_output_tokens`, including reasoning. Choose an effort supported by the model. Manual thinking budgets are rejected before admission.
+`maxTokens` becomes `max_output_tokens`, including reasoning. Choose an effort supported by the model. Manual thinking budgets are rejected before admission. Optional `temperature` accepts 0–2 when the selected model supports sampling. It cannot combine with an explicit reasoning effort other than `none`; unsupported model settings remain provider errors.
 
 ## Compatible endpoints
 
@@ -61,5 +61,7 @@ Text works by default. Enable the shown capabilities only after verifying server
 ## Shared behavior
 
 All three adapters support [images](images.md) with compatible models; compatible endpoints require explicit opt-in. Schemas are sent unchanged; Small Hour runs your [parser](embedding.md#structured-results) afterward. SDK types do not validate actual output.
+
+The compatible adapter forwards optional `temperature` (0–2) unchanged; configure it only when the local model/server supports sampling.
 
 Native reasoning and call IDs stay intact inside the tool exchange; provider history is not retained across turns. Refused, filtered, malformed, or incomplete responses cannot authorize accepted output or tools. Missing usage remains unknown. Bind provider settings and prices to saved workflow versions.

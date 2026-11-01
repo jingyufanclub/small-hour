@@ -6,6 +6,7 @@ export interface OpenAICompatibleProviderOptions {
   model: string;
   baseURL: string;
   apiKey?: string;
+  temperature?: number;
   capabilities?: { tools?: boolean; structuredOutput?: boolean; images?: boolean };
   fetch?: typeof globalThis.fetch;
 }
@@ -83,6 +84,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
   private readonly url: string;
   get model(): string { return this.options.model; }
   constructor(private readonly options: OpenAICompatibleProviderOptions) {
+    this.options = { ...options };
+    if (options.temperature !== undefined && (!Number.isFinite(options.temperature) || options.temperature < 0 || options.temperature > 2))
+      throw new TypeError("temperature must be between 0 and 2");
     if (!options.model.trim()) throw new TypeError("compatible provider model is required");
     this.url = endpoint(options.baseURL, "chat/completions");
     this.capabilities = { tools: options.capabilities?.tools === true, structuredOutput: options.capabilities?.structuredOutput === true, thinkingBudget: false, images: options.capabilities?.images === true };
@@ -95,6 +99,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const body = {
       model: this.model, messages: [{ role: "system", content: request.system.map((block) => block.text).join("\n\n") }, ...chatMessages(request.messages)],
       max_tokens: request.maxTokens, stream: false,
+      ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
       ...(request.tools.length ? { tools: request.tools.map((tool) => ({ type: "function", function: {
         name: tool.name, description: tool.description, parameters: tool.inputSchema, strict: tool.strict ?? true,
       } })) } : {}),
