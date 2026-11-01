@@ -23,6 +23,7 @@ flowchart LR
     Request["App request identity"] --> Step["Optional durable model step"]
     Step --> Calls["Model calls: input, output, checks, cost"]
     Request --> Calls
+    Settings["App provider settings: model, reasoning, sampling"] --> Calls
     Calls --> Result["Accepted result or recoverable progress"]
     Calls -. "IDs, timing, safe error codes" .-> Diagnostics["Operational diagnostics"]
 ```

@@ -318,3 +318,34 @@ for (const protocol of ["responses", "chat"] as const) {
     assert.equal(report.modelCalls[0].requestId, "request-1");
   });
 }
+
+for (const protocol of ["responses", "compatible"] as const) {
+  test(`${protocol} preserves sampling settings in dispatched work and provider evidence`, async () => {
+    for (const temperature of [undefined, 0, 0.9]) {
+      const http = transport([protocol === "responses" ? response([message('{"selectedId":"item-7"}')]) : completion('{"selectedId":"item-7"}')]);
+      const settings = { model: "test-model", apiKey: "fixture", temperature, fetch: http.fetch };
+      const provider = protocol === "responses" ? new OpenAIProvider(settings)
+        : new OpenAICompatibleProvider({ ...settings, baseURL: "http://127.0.0.1:12345/v1", capabilities: { structuredOutput: true } });
+      settings.temperature = 0.7;
+      const traces: unknown[] = [];
+      const result = await provider.complete({ system: [], messages: [{ role: "user", content: "Choose item-7." }], tools: [],
+        maxTokens: 100, outputSchema: schema, signal: new AbortController().signal,
+        trace: { context: { traceId: "1".repeat(32), spanId: "2".repeat(16) }, request: body => { traces.push(body); }, response: () => {} } });
+      assert.equal(result.stopReason, "end_turn");
+      assert.equal(http.requests.length, 1);
+      assert.equal(http.requests[0].body.temperature, temperature);
+      assert.equal(Object.hasOwn(http.requests[0].body, "temperature"), temperature !== undefined);
+      assert.deepEqual(traces, [http.requests[0].body]);
+    }
+  });
+}
+
+test("invalid sampling and incompatible reasoning are rejected before any provider dispatch", () => {
+  const http = transport([]);
+  for (const temperature of [-1, 2.1, NaN, Infinity]) {
+    assert.throws(() => new OpenAIProvider({ model: "test-model", apiKey: "fixture", temperature, fetch: http.fetch }), /temperature/);
+    assert.throws(() => new OpenAICompatibleProvider({ model: "test-model", baseURL: "http://127.0.0.1:12345/v1", temperature, fetch: http.fetch }), /temperature/);
+  }
+  assert.throws(() => new OpenAIProvider({ model: "test-model", apiKey: "fixture", temperature: 0, reasoningEffort: "high", fetch: http.fetch }), /temperature/);
+  assert.equal(http.requests.length, 0);
+});
