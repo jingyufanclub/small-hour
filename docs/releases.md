@@ -1,9 +1,9 @@
 # Install and upgrade
 
-Requires Node.js 26.10+ with ESM imports. Install the built [0.16.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.16.0):
+Requires Node.js 26.10+ with ESM imports. Install the built [0.17.0 artifact](https://github.com/jingyufanclub/small-hour/releases/tag/v0.17.0):
 
 ```sh
-npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.16.0/small-hour-0.16.0.tgz
+npm install --save-exact https://github.com/jingyufanclub/small-hour/releases/download/v0.17.0/small-hour-0.17.0.tgz
 ```
 
 Commit your manifest and lockfile; `npm ci` verifies recorded integrity. Releases include `SHA256SUMS`.

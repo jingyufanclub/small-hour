@@ -13,7 +13,17 @@ await runtime.turn({
 });
 ```
 
-Anthropic and OpenAI Responses support images with a vision-capable model. The OpenAI-compatible Chat Completions adapter does not.
+Anthropic and OpenAI Responses support images with a vision-capable model. For OpenAI-compatible Chat Completions servers, enable `capabilities: { images: true }` only when the selected server and model support vision.
+
+```mermaid
+flowchart LR
+    App[Application: authorize and load image bytes] --> Input[Ordered text and image blocks]
+    Input --> Check[Shared capability and input validation]
+    Check --> Admission[Existing call admission]
+    Admission --> Adapter[Selected provider adapter]
+    Adapter --> Server[Configured model server]
+    Server --> Record[Existing result and usage reporting]
+```
 
 ## Prepare and limit the input
 
