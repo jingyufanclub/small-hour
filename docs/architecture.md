@@ -24,7 +24,9 @@ flowchart LR
     Step --> Calls["Model calls: input, output, checks, cost"]
     Request --> Calls
     Settings["App provider settings: model, reasoning, sampling"] --> Calls
-    Calls --> Result["Accepted result or recoverable progress"]
+    Calls --> Adapter["Provider adapter: explicit settings to wire fields"]
+    Adapter --> Endpoint["Selected model endpoint"]
+    Endpoint --> Result["Accepted result or recoverable progress"]
     Calls -. "IDs, timing, safe error codes" .-> Diagnostics["Operational diagnostics"]
 ```
 
