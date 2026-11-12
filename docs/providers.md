@@ -56,7 +56,7 @@ const provider = new OpenAICompatibleProvider({
 
 Supply your server's `baseURL`, normally ending in `/v1`. Only explicit credentials are used. No server, model, or fallback is selected automatically.
 
-Text works by default. Enable the shown capabilities only after verifying server/model support. Images use ordered Chat Completions content parts with base64 data URLs. Thinking budgets are unsupported. `maxTokens` becomes `max_tokens`.
+Text works by default. Enable the shown capabilities only after verifying server/model support. Images use ordered Chat Completions content parts with base64 data URLs. Thinking token budgets are unsupported. Optional `reasoningEffort` forwards a server-supported name as `reasoning_effort`; omission preserves the server default. For Ollama, `none` requests thinking off where the model permits it. Check the installed server and model support; the adapter does not discover or translate names. `maxTokens` becomes `max_tokens`.
 
 ## Shared behavior
 
